@@ -13,5 +13,10 @@
   "scripts": {
     "start": "cds-serve"
   },
+  "cds": {
+    "requires": {
+      "auth": {"kind": "dummy"}
+    }
+  },
   "private": true
 }
