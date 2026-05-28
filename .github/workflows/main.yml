@@ -29,14 +29,13 @@ jobs:
         run: |
           mkdir -p iflows/${{ github.event.inputs.package_id }}
           
-          # Alle iFlow IDs aus dem Package holen
-          IFLOWS=$(curl -s \
+          # Debug: Raw API Response anzeigen
+          RESPONSE=$(curl -s \
             "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('${{ github.event.inputs.package_id }}')/IntegrationDesigntimeArtifacts" \
             -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
-            -H "Accept: application/json" \
-            | jq -r '.d.results[].Id')
+            -H "Accept: application/json")
           
-          echo "Found iFlows: $IFLOWS"
+          echo "API Response: $RESPONSE"
           
           # Jeden iFlow als ZIP herunterladen und entpacken
           for IFLOW_ID in $IFLOWS; do
