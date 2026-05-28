@@ -20,13 +20,20 @@ jobs:
          - name: Get Bearer Token
            id: get-token
            run: |
-            TOKEN=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
+            curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
               -H "Content-Type: application/x-www-form-urlencoded" \
               --data-urlencode "grant_type=client_credentials" \
               --data-urlencode "client_id=${{ secrets.IAS_CLIENTID }}" \
-              --data-urlencode "client_secret=${{ secrets.IAS_CLIENTSECRET }}" \
-              | jq -r '.access_token')
-            if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then echo "Auth failed"; exit 1; fi
+              --data-urlencode "client_secret=${{ secrets.IAS_CLIENTSECRET }}" > auth_response.json
+
+            TOKEN=$(cat auth_response.json | jq -r '.access_token')
+
+            if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+              echo "--- AUTHENTICATION FAILED ---"
+              echo "SAP XSUAA Response:"
+              cat auth_response.json
+              exit 1
+            fi
             echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
          - name: Download iFlows from Integration Suite
@@ -42,7 +49,9 @@ jobs:
             IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id')
 
             if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
-              echo "No iFlows found. Check if CPI_HOST is the integrationsuite host."
+              echo "--- DOWNLOAD FAILED ---"
+              echo "Integration Suite Response:"
+              echo "$RESPONSE"
               exit 1
             fi
 
