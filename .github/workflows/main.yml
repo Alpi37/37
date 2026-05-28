@@ -83,3 +83,7 @@ jobs:
               git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}
               git push
             fi
+         - name: Build MTA
+           run: |
+            npm install -g mbt
+            mbt build -t gen
