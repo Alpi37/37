@@ -13,19 +13,17 @@ jobs:
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GIT_TOKEN }}
 
       - name: Sync iFlows from CPI
         uses: engswee/flashpipe-action/sync@v1
         with:
-          tmn-host: ${{ vars.BTP_API_URL }}
-          oauth-clientid: ${{ secrets.BTP_API_CLIENT_ID }}
-          oauth-clientsecret: ${{ secrets.BTP_API_CLIENT_SECRET }}
+          tmn-host: ${{ vars.CPI_HOST }}
+          oauth-clientid: ${{ secrets.IAS_CLIENTID }}
+          oauth-clientsecret: ${{ secrets.IAS_CLIENTSECRET }}
           oauth-tokenendpoint: ${{ vars.BTP_TOKEN_URL }}
           package-id: ${{ github.event.inputs.package_id }}
           package-name: ${{ github.event.inputs.package_id }}
           dir-artifacts-relative: iflows
           git-user-email: github-actions@github.com
           git-user-name: github-actions
-          token: ${{ secrets.GIT_TOKEN }}
+          token: ${{ secrets.GHTOKEN }}
