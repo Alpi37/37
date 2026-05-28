@@ -1,62 +1,71 @@
 name: Sync iFlows to Git
 
 on:
-  workflow_dispatch:
-    inputs:
-      package_id:
-        description: 'Package ID from Integration Suite'
-        required: true
+    workflow_dispatch:
+      inputs:
+        package_id:
+          description: 'Package ID from Integration Suite'
+          required: true
 
 jobs:
-  sync:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout this repo
-        uses: actions/checkout@v4
+    sync:
+      runs-on: ubuntu-latest
+      permissions:
+        contents: write
 
-      - name: Get Bearer Token
-        id: get-token
-        run: |
-          TOKEN=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            --data-urlencode "grant_type=client_credentials" \
-            --data-urlencode "client_id=${{ secrets.IAS_CLIENTID }}" \
-            --data-urlencode "client_secret=${{ secrets.IAS_CLIENTSECRET }}" \
-            | jq -r '.access_token')
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+      steps:
+         - name: Checkout this repo
+           uses: actions/checkout@v4
 
-      - name: Download iFlows from Integration Suite
-        run: |
-          mkdir -p iflows/${{ github.event.inputs.package_id }}
-          
-          # Debug: Raw API Response anzeigen
-          RESPONSE=$(curl -s \
-            "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('${{ github.event.inputs.package_id }}')/IntegrationDesigntimeArtifacts" \
-            -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
-            -H "Accept: application/json")
-          
-          echo "API Response: $RESPONSE"
-          
-          # Jeden iFlow als ZIP herunterladen und entpacken
-          for IFLOW_ID in $IFLOWS; do
-            echo "Downloading: $IFLOW_ID"
-            curl -s \
-              "${{ vars.CPI_HOST }}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+         - name: Get Bearer Token
+           id: get-token
+           run: |
+            TOKEN=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
+              -H "Content-Type: application/x-www-form-urlencoded" \
+              --data-urlencode "grant_type=client_credentials" \
+              --data-urlencode "client_id=${{ secrets.IAS_CLIENTID }}" \
+              --data-urlencode "client_secret=${{ secrets.IAS_CLIENTSECRET }}" \
+              | jq -r '.access_token')
+            if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then echo "Auth failed"; exit 1; fi
+            echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+         - name: Download iFlows from Integration Suite
+           run: |
+            PACKAGE_ID="${{ github.event.inputs.package_id }}"
+            mkdir -p "iflows/$PACKAGE_ID"
+
+            RESPONSE=$(curl -s \
+              "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
               -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
-              -o "iflows/${{ github.event.inputs.package_id }}/${IFLOW_ID}.zip"
-            
-            unzip -o "iflows/${{ github.event.inputs.package_id }}/${IFLOW_ID}.zip" \
-              -d "iflows/${{ github.event.inputs.package_id }}/${IFLOW_ID}"
-            rm "iflows/${{ github.event.inputs.package_id }}/${IFLOW_ID}.zip"
-          done
+              -H "Accept: application/json")
 
-      - name: Commit and Push
-        run: |
-          git config user.email "github-actions@github.com"
-          git config user.name "github-actions"
-          git add iflows/
-          git diff --staged --quiet || git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }}"
-          git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
-          git push
-        env:
-          GITHUB_TOKEN: ${{ secrets.GHTOKEN }}
+            IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id')
+
+            if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
+              echo "No iFlows found. Check if CPI_HOST is the integrationsuite- host."
+              exit 1
+            fi
+
+            for IFLOW_ID in $IFLOWS; do
+              echo "Downloading: $IFLOW_ID"
+              curl -s \
+                "${{ vars.CPI_HOST }}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+                -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
+                -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+
+              unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
+              rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+            done
+
+         - name: Commit and Push
+           run: |
+            git config user.email "github-actions@github.com"
+            git config user.name "github-actions"
+            git add iflows/
+            if git diff --staged --quiet; then
+              echo "No changes detected."
+            else
+              git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }}"
+              git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}
+              git push
+            fi
