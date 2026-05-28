@@ -13,27 +13,16 @@ jobs:
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
-
-      - name: Get Bearer Token from BTP
-        id: get-token
-        run: |
-          TOKEN=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "grant_type=client_credentials" \
-            -d "client_id=${{ secrets.BTP_API_CLIENT_ID }}" \
-            -d "client_secret=${{ secrets.BTP_API_CLIENT_SECRET }}" \
-            | jq -r '.access_token')
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
-
-      - name: Download from SAP
-        uses: SAP/cicd-actions-for-sap-integration-suite/.github/actions/download-package@main
-        with:
-          bearer-token: ${{ steps.get-token.outputs.token }}
-          btp-api-url: ${{ vars.BTP_API_URL }}
-          package-id: ${{ github.event.inputs.package_id }}
-
-      - name: Commit to Git
-        uses: SAP/cicd-actions-for-sap-integration-suite/.github/actions/git-commit@main
         with:
           token: ${{ secrets.GIT_TOKEN }}
-          commit-message: "Manual Sync of ${{ github.event.inputs.package_id }}"
+
+      - name: Sync iFlows from CPI
+        uses: engswee/flashpipe-action/sync@v1
+        with:
+          tmn-host: ${{ vars.BTP_API_URL }}
+          oauth-clientid: ${{ secrets.BTP_API_CLIENT_ID }}
+          oauth-clientsecret: ${{ secrets.BTP_API_CLIENT_SECRET }}
+          oauth-tokenendpoint: ${{ vars.BTP_TOKEN_URL }}
+          package-id: ${{ github.event.inputs.package_id }}
+          package-name: ${{ github.event.inputs.package_id }}
+          dir-artifacts-relative: iflows
