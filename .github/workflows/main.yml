@@ -43,6 +43,7 @@ jobs:
           git config user.name "github-actions"
           git add iflows/
           git diff --staged --quiet || git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }}"
+          git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}
           git push
         env:
           GITHUB_TOKEN: ${{ secrets.GHTOKEN }}
