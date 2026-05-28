@@ -1,20 +1,20 @@
 _schema-version: 3.3.0
 ID: cap-minimal
 version: 1.0.0
-description: "Combined CAP and Integration Suite Project"
+description: "Combined Project"
 
 parameters:
   enable-parallel-deployments: true
 
 build-parameters:
   before-all:
-     - builder: custom
+    - builder: custom
       commands:
-          - npm ci
-          - npx cds build --production
+        - npm ci
+        - npx cds build --production
 
 modules:
-   - name: cap-minimal-srv
+  - name: cap-minimal-srv
     type: nodejs
     path: gen/srv
     parameters:
@@ -23,12 +23,12 @@ modules:
     build-parameters:
       builder: npm-ci
     provides:
-        - name: srv-api
+      - name: srv-api
         properties:
           srv-url: ${default-url}
 
-    - name: integration-content-ay
+  - name: integration-content-ay
     type: com.sap.integration.suite.package
     path: iflows/AY
     parameters:
-      service-key-name: AY
+      service-key-name: default_key
