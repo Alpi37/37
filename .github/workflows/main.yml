@@ -26,3 +26,6 @@ jobs:
           package-id: ${{ github.event.inputs.package_id }}
           package-name: ${{ github.event.inputs.package_id }}
           dir-artifacts-relative: iflows
+          git-user-email: github-actions@github.com
+          git-user-name: github-actions
+          token: ${{ secrets.GIT_TOKEN }}
