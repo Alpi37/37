@@ -23,18 +23,16 @@ jobs:
             BTP_CLIENT_ID: ${{ secrets.IAS_CLIENTID }}
             BTP_CLIENT_SECRET: ${{ secrets.IAS_CLIENTSECRET }}
            run: |
-            curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
+            RESPONSE=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
               -H "Content-Type: application/x-www-form-urlencoded" \
               --data-urlencode "grant_type=client_credentials" \
               --data-urlencode "client_id=$BTP_CLIENT_ID" \
-              --data-urlencode "client_secret=$BTP_CLIENT_SECRET" > auth_response.json
+              --data-urlencode "client_secret=$BTP_CLIENT_SECRET")
 
-            TOKEN=$(cat auth_response.json | jq -r '.access_token')
+            TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
 
             if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
-              echo "--- AUTHENTICATION FAILED ---"
-              echo "SAP XSUAA Response:"
-              cat auth_response.json
+              echo "Auth failed. Response: $RESPONSE"
               exit 1
             fi
             echo "token=$TOKEN" >> $GITHUB_OUTPUT
@@ -49,12 +47,16 @@ jobs:
               -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
               -H "Accept: application/json")
 
+            if [[ ! "$RESPONSE" == \{* ]]; then
+              echo "Error: SAP did not return JSON. Response was:"
+              echo "$RESPONSE"
+              exit 1
+            fi
+
             IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id')
 
             if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
-              echo "--- DOWNLOAD FAILED ---"
-              echo "Integration Suite Response:"
-              echo "$RESPONSE"
+              echo "No iFlows found in package $PACKAGE_ID"
               exit 1
             fi
 
