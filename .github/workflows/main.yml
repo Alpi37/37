@@ -1,3 +1,5 @@
+name: Sync iFlows to Git
+
 on:
     workflow_dispatch:
       inputs:
@@ -6,7 +8,7 @@ on:
           required: true
           default: 'AY'
 
-  jobs:
+jobs:
     sync:
       runs-on: ubuntu-latest
       permissions:
@@ -14,11 +16,11 @@ on:
 
       steps:
          - name: Checkout this repo
-          uses: actions/checkout@v4
+           uses: actions/checkout@v4
 
          - name: Get Bearer Token from XSUAA
-          id: get-token
-          run: |
+           id: get-token
+           run: |
             TOKEN=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
               -H "Content-Type: application/x-www-form-urlencoded" \
               --data-urlencode "grant_type=client_credentials" \
@@ -29,7 +31,7 @@ on:
             echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
          - name: Download and Extract iFlows
-          run: |
+           run: |
             PACKAGE_ID="${{ github.event.inputs.package_id }}"
             mkdir -p "iflows/$PACKAGE_ID"
 
@@ -59,7 +61,7 @@ on:
             done
 
          - name: Commit and Push to GitHub
-          run: |
+           run: |
             git config user.email "github-actions@github.com"
             git config user.name "github-actions"
             git add iflows/
