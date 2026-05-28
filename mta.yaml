@@ -8,13 +8,13 @@ parameters:
 
 build-parameters:
   before-all:
-      - builder: custom
+     - builder: custom
       commands:
           - npm ci
           - npx cds build --production
 
 modules:
-    - name: cap-minimal-srv
+   - name: cap-minimal-srv
     type: nodejs
     path: gen/srv
     parameters:
