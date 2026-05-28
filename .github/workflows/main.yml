@@ -14,16 +14,49 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
-      - name: Sync iFlows from CPI
-        uses: engswee/flashpipe-action/sync@v1
-        with:
-          tmn-host: ${{ vars.CPI_HOST }}
-          oauth-clientid: ${{ secrets.IAS_CLIENTID }}
-          oauth-clientsecret: ${{ secrets.IAS_CLIENTSECRET }}
-          oauth-tokenendpoint: ${{ vars.BTP_TOKEN_URL }}
-          package-id: ${{ github.event.inputs.package_id }}
-          package-name: ${{ github.event.inputs.package_id }}
-          dir-artifacts-relative: iflows
-          git-user-email: github-actions@github.com
-          git-user-name: github-actions
-          token: ${{ secrets.GHTOKEN }}
+      - name: Get Bearer Token
+        id: get-token
+        run: |
+          TOKEN=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=${{ secrets.IAS_CLIENTID }}" \
+            --data-urlencode "client_secret=${{ secrets.IAS_CLIENTSECRET }}" \
+            | jq -r '.access_token')
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Download iFlows from Integration Suite
+        run: |
+          mkdir -p iflows/${{ github.event.inputs.package_id }}
+          
+          # Alle iFlow IDs aus dem Package holen
+          IFLOWS=$(curl -s \
+            "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('${{ github.event.inputs.package_id }}')/IntegrationDesigntimeArtifacts" \
+            -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
+            -H "Accept: application/json" \
+            | jq -r '.d.results[].Id')
+          
+          echo "Found iFlows: $IFLOWS"
+          
+          # Jeden iFlow als ZIP herunterladen und entpacken
+          for IFLOW_ID in $IFLOWS; do
+            echo "Downloading: $IFLOW_ID"
+            curl -s \
+              "${{ vars.CPI_HOST }}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+              -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
+              -o "iflows/${{ github.event.inputs.package_id }}/${IFLOW_ID}.zip"
+            
+            unzip -o "iflows/${{ github.event.inputs.package_id }}/${IFLOW_ID}.zip" \
+              -d "iflows/${{ github.event.inputs.package_id }}/${IFLOW_ID}"
+            rm "iflows/${{ github.event.inputs.package_id }}/${IFLOW_ID}.zip"
+          done
+
+      - name: Commit and Push
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
+          git add iflows/
+          git diff --staged --quiet || git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }}"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GHTOKEN }}
