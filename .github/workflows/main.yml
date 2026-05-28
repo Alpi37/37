@@ -87,3 +87,8 @@ jobs:
            run: |
             npm install -g mbt
             mbt build -t gen
+         - name: Upload MTAR as Artifact
+           uses: actions/upload-artifact@v4
+           with:
+             name: transport-package
+             path: gen/*.mtar
