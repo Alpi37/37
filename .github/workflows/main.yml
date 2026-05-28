@@ -14,13 +14,22 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
+      - name: Get Bearer Token from BTP
+        id: get-token
+        run: |
+          TOKEN=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=client_credentials" \
+            -d "client_id=${{ secrets.BTP_API_CLIENT_ID }}" \
+            -d "client_secret=${{ secrets.BTP_API_CLIENT_SECRET }}" \
+            | jq -r '.access_token')
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
       - name: Download from SAP
         uses: SAP/cicd-actions-for-sap-integration-suite/.github/actions/download-package@main
         with:
-          client-id: ${{ secrets.BTP_API_CLIENT_ID }}
-          client-secret: ${{ secrets.BTP_API_CLIENT_SECRET }}
-          token-url: ${{ vars.BTP_TOKEN_URL }}
-          management-url: ${{ vars.BTP_API_URL }}
+          bearer-token: ${{ steps.get-token.outputs.token }}
+          btp-api-url: ${{ vars.BTP_API_URL }}
           package-id: ${{ github.event.inputs.package_id }}
 
       - name: Commit to Git
