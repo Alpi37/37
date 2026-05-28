@@ -19,12 +19,15 @@ jobs:
 
          - name: Get Bearer Token
            id: get-token
+           env:
+            BTP_CLIENT_ID: ${{ secrets.IAS_CLIENTID }}
+            BTP_CLIENT_SECRET: ${{ secrets.IAS_CLIENTSECRET }}
            run: |
             curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
               -H "Content-Type: application/x-www-form-urlencoded" \
               --data-urlencode "grant_type=client_credentials" \
-              --data-urlencode "client_id=${{ secrets.IAS_CLIENTID }}" \
-              --data-urlencode "client_secret=${{ secrets.IAS_CLIENTSECRET }}" > auth_response.json
+              --data-urlencode "client_id=$BTP_CLIENT_ID" \
+              --data-urlencode "client_secret=$BTP_CLIENT_SECRET" > auth_response.json
 
             TOKEN=$(cat auth_response.json | jq -r '.access_token')
 
