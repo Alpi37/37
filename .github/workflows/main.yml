@@ -1,10 +1,30 @@
-name: Hello World
+name: Sync iFlows to Git
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+    inputs:
+      package_id:
+        description: 'Package ID from Integration Suite'
+        required: true
 
 jobs:
-  say-hello:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Hello World ausgeben
-        run: echo "Hello World!"
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Download from SAP
+        uses: SAP/cicd-actions-for-sap-integration-suite/.github/actions/download-package@main
+        with:
+          client-id: ${{ secrets.BTP_API_CLIENT_ID }}
+          client-secret: ${{ secrets.BTP_API_CLIENT_SECRET }}
+          token-url: ${{ vars.BTP_TOKEN_URL }}
+          management-url: ${{ vars.BTP_API_URL }}
+          package-id: ${{ github.event.inputs.package_id }}
+
+      - name: Commit to Git
+        uses: SAP/cicd-actions-for-sap-integration-suite/.github/actions/git-commit@main
+        with:
+          token: ${{ secrets.GIT_TOKEN }}
+          commit-message: "Manual Sync of ${{ github.event.inputs.package_id }}"
