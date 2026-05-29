@@ -9,3 +9,12 @@ modules:
     path: iflows/AY
     parameters:
       service-key-name: AY
+    requires:
+      - name: integration-suite-instance
+
+resources:
+  - name: integration-suite-instance
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: it-rt
+      service-plan: api
