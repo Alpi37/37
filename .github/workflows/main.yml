@@ -36,15 +36,18 @@ jobs:
           fi
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-      # 2. iFlows als ZIP-Dateien aus SAP herunterladen und lokal entpacken
+      # 2. iFlows als ZIP-Dateien aus SAP herunterladen und lokal entpacken (Jetzt voll-dynamisch)
       - name: Download iFlows from Integration Suite
         run: |
           PACKAGE_ID="${{ github.event.inputs.package_id }}"
           mkdir -p "iflows/$PACKAGE_ID"
+          
+          # FIX: Festcodierte URL durch ${{ vars.CPI_HOST }} ersetzt
           RESPONSE=$(curl -s \
-            "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
+            "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
             -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
             -H "Accept: application/json")
+          
           if [[ ! "$RESPONSE" == \{* ]]; then
             echo "Error: SAP did not return JSON. Response was:"
             echo "$RESPONSE"
@@ -57,10 +60,13 @@ jobs:
           fi
           for IFLOW_ID in $IFLOWS; do
             echo "Downloading: $IFLOW_ID"
+            
+            # FIX: Auch hier die festcodierte URL durch ${{ vars.CPI_HOST }} ersetzt
             curl -s \
-              "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+              "${{ vars.CPI_HOST }}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
               -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
               -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+            
             unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
             rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
           done
@@ -119,7 +125,6 @@ jobs:
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
           echo "Uploading compiled payload archive [$MTAR_FILE] to cTMS Node [$NODE_NAME]..."
 
-          # --- KORREKTUR: Endpunkt auf /v2/files geändert und nodeName als Parameter übergeben ---
           UPLOAD_URI="${TMS_API_URL}/v2/files"
           
           RESPONSE_FILE=$(mktemp)
