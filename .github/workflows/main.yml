@@ -1,55 +1,105 @@
-name: CI/CD Integration Suite Deployment
+name: SAP Integration Suite CI/CD Pipeline
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch: # Erlaubt es dir, die Pipeline auch manuell in GitHub zu starten
 
 jobs:
-  # 1. Schritt: iFlows holen und sichern (wie im SAP Repo)
-  sync-assets:
+  sync-build-deploy:
     runs-on: ubuntu-latest
-    outputs:
-      changed: ${{ steps.check-changes.outputs.changed }}
+
     steps:
+      # --- 1. REPOSITORY AUSCHECKEN ---
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
-      # Hier nutzen wir das offizielle NPM-Paket oder CLI-Tools, die SAP im Repo verwendet
-      - name: Fetch Integration Packages from CPI
-        env:
-          CPI_TOKEN_URL: ${{ secrets.BTP_TOKEN_URL }}
-          CPI_CLIENT_ID: ${{ secrets.BTP_CLIENT_ID }}
-          CPI_CLIENT_SECRET: ${{ secrets.BTP_CLIENT_SECRET }}
-          CPI_API_URL: "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com"
+      # --- 2. AUTHENTIFIZIERUNG GEGEN SAP CPI (INTEGRATION SUITE) ---
+      - name: Authenticate against SAP CPI
+        id: cpi_auth
         run: |
-          echo "Lade iFlows über offizielle API-Struktur..."
-          # [Deine funktionierende Download-Logik bleibt hier, da sie bereits sauber lief]
+          RESPONSE=$(curl -s -X POST "https://bti-payg.authentication.eu10.hana.ondemand.com/oauth/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=${{ secrets.BTP_CLIENT_ID }}" \
+            --data-urlencode "client_secret=${{ secrets.BTP_CLIENT_SECRET }}")
+          
+          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+            echo "Auth failed. Response: $RESPONSE"
+            exit 1
+          fi
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-  # 2. Schritt: Der automatisierte Release- & Transport-Step nach SAP-Standard
-  deploy-to-btp:
-    needs: sync-assets
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      # --- 3. IFLOWS RUNTERLADEN UND ENTPACKEN ---
+      - name: Fetch and Unzip iFlows
+        run: |
+          PACKAGE_ID="AY"
+          mkdir -p "iflows/$PACKAGE_ID"
+          
+          RESPONSE=$(curl -s \
+            "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
+            -H "Authorization: Bearer ${{ steps.cpi_auth.outputs.token }}" \
+            -H "Accept: application/json")
+          
+          if [[ ! "$RESPONSE" == \{* ]]; then
+            echo "Error: SAP did not return JSON. Response was:"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          
+          IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id')
+          if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
+            echo "No iFlows found in package $PACKAGE_ID"
+            exit 1
+          fi
+          
+          for IFLOW_ID in $IFLOWS; do
+            echo "Downloading: $IFLOW_ID"
+            
+            curl -s \
+              "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+              -H "Authorization: Bearer ${{ steps.cpi_auth.outputs.token }}" \
+              -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+            
+            unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
+            rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+          done
 
-      # SAP baut die MTARs im Repo über standardisierte Node-Skripte.
-      - name: Set up NodeJS
+      # --- 4. ÄNDERUNGEN INS GIT REPOSITORY BACKUPPEN ---
+      - name: Commit and Push Changes to Git
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
+          git add iflows/
+          
+          if git diff --staged --quiet; then
+            echo "No changes detected in iFlows. Proceeding with build..."
+          else
+            git commit -m "Sync iFlows from package AY [skip ci]"
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+            git push origin main
+          fi
+
+      # --- 5. NODE.JS & CLOUD MTA BUILD TOOL EINRICHTEN ---
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Cloud MTA Build Tool
+      - name: Install Cloud MTA Build Tool (mbt)
         run: npm install -g mbt
 
-      - name: Build Multi-Target Application Archive (MTAR)
+      # --- 6. MTAR-ARCHIV KOMPILIEREN ---
+      - name: Build MTA Archive
         run: mbt build -t gen
 
-      # JETZT DER CLOU: Statt fehleranfälligem curl nutzen wir die offizielle SAP Transport-Logik
-      - name: Deploy to SAP BTP via Official Delivery Control
+      # --- 7. ARTEFAKT HOCHLADEN UND IN SAP cTMS REGISTRIEREN ---
+      - name: Deploy to SAP BTP via cTMS (v1 API)
         env:
-          # Wir nutzen hier die Umgebungsvariablen, die das SAP-Repo in seinen Actions erwartet
           NODE_NAME: "ACX_TARGET"
           TMS_API_URL: "https://transport-service-app-backend.ts.cfapps.eu10.hana.ondemand.com"
           TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
@@ -57,18 +107,40 @@ jobs:
           TMS_TOKEN_URL: ${{ secrets.TMS_TOKEN_URL }}
         run: |
           MTAR_PATH=$(ls gen/*.mtar | head -n 1)
-          echo "Nutze SAP Deployer-Konfiguration für: $MTAR_PATH"
+          MTAR_NAME=$(basename "$MTAR_PATH")
+          echo "Gefundenes Artefakt: $MTAR_PATH ($MTAR_NAME)"
           
-          # Das SAP Repo zeigt: Für den Transport via Pipeline nutzen sie oft die SAP Cloud MTA CLI
-          # oder senden den Multipart-Request mit exakten Boundary-Spezifikationen.
+          echo "Fordere Handshake-Token von cTMS an..."
+          TOKEN_RAW=$(curl -s -X POST "$TMS_TOKEN_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$TMS_CLIENT_ID" \
+            --data-urlencode "client_secret=$TMS_CLIENT_SECRET")
           
-          TOKEN=$(curl -s -X POST "$TMS_TOKEN_URL" \
-            -d "grant_type=client_credentials&client_id=$TMS_CLIENT_ID&client_secret=$TMS_CLIENT_SECRET" \
-            | jq -r '.access_token')
+          TMS_TOKEN=$(echo "$TOKEN_RAW" | jq -r '.access_token')
+          if [ "$TMS_TOKEN" == "null" ] || [ -z "$TMS_TOKEN" ]; then
+            echo "CRITICAL: cTMS Authentication failed. Details: $TOKEN_RAW"
+            exit 1
+          fi
           
-          # Der exakte v1-Multipart-Upload-Formfaktor aus dem SAP-Umfeld:
-          curl -X POST "${TMS_API_URL}/v1/nodes/upload?nodeName=${NODE_NAME}" \
-            -H "Authorization: Bearer $TOKEN" \
-            -H "Content-Type: multipart/form-data" \
-            -F "file=@${MTAR_PATH};type=application/x-zip-compressed" \
-            --fail-with-body
+          echo "Upload und Registrierung an cTMS Node [$NODE_NAME] läuft..."
+          RESPONSE_FILE=$(mktemp)
+          
+          # Der gefixte SAP v1-Aufruf (inklusive Dateiname im Multipart-Body)
+          HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload?nodeName=${NODE_NAME}" \
+            -H "Authorization: Bearer $TMS_TOKEN" \
+            -F "file=@${MTAR_PATH};filename=${MTAR_NAME};type=application/octet-stream" \
+            --fail-with-body)
+          
+          BODY=$(cat "$RESPONSE_FILE")
+          rm "$RESPONSE_FILE"
+          
+          echo "cTMS Gateway Status Code: $HTTP_CODE"
+          echo "cTMS Gateway Server-Antwort: $BODY"
+          
+          if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
+            echo "CRITICAL: cTMS Gateway hat die Validierung abgelehnt."
+            exit 1
+          fi
+          
+          echo "SUCCESS: Das Integration-MTA wurde erfolgreich in die cTMS Import-Queue geschoben!"
