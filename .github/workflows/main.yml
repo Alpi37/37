@@ -104,7 +104,7 @@ jobs:
           TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
           TMS_TOKEN_URL: ${{ secrets.TMS_TOKEN_URL }}
           TMS_API_URL: ${{ vars.TMS_URL }}
-          NODE_NAME: "ACX_SOURCE"
+          NODE_NAME: "ACX_TARGET"
         run: |
           echo "Requesting handshake token from Target cTMS instance..."
           
