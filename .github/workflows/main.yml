@@ -82,9 +82,9 @@ jobs:
       - name: Deploy to cTMS
         uses: mauriciolauffer/deploy-to-sap-btp-with-ctms@main
         with:
-          CTMS_TOKEN_URL: ${{ secrets.TMS_TOKEN_URL }}
+          CTMS_TOKEN_SERVICE_URL: ${{ secrets.TMS_TOKEN_URL }}/oauth/token
           CTMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
           CTMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
-          CTMS_BASE_URL: ${{ vars.TMS_URL }}
-          CTMS_TARGET_NODE: ${{ vars.TMS_NODE_NAME }}
-          CTMS_MTA_PATH: gen
+          CTMS_API_URL: ${{ vars.TMS_URL }}
+          CTMS_NODE_NAME: ${{ vars.TMS_NODE_NAME }}
+          CTMS_FILE_PATH: ${{ github.workspace }}/gen/integration-suite-packages_1.0.0.mtar
