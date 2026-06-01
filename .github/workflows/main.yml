@@ -132,7 +132,7 @@ jobs:
             -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Accept: application/json" \
             -F "file=@$MTAR_FILE" \
-            -F "nodeName=$node")
+            -F "node=$NODE_NAME")
 
           BODY=$(cat "$RESPONSE_FILE")
           rm "$RESPONSE_FILE"
