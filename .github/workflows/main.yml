@@ -42,7 +42,7 @@ jobs:
           PACKAGE_ID="${{ github.event.inputs.package_id }}"
           mkdir -p "iflows/$PACKAGE_ID"
           RESPONSE=$(curl -s \
-            "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
+            "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
             -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
             -H "Accept: application/json")
           if [[ ! "$RESPONSE" == \{* ]]; then
@@ -58,7 +58,7 @@ jobs:
           for IFLOW_ID in $IFLOWS; do
             echo "Downloading: $IFLOW_ID"
             curl -s \
-              "${{ vars.CPI_HOST }}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+              "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
               -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
               -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
             unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
@@ -119,14 +119,15 @@ jobs:
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
           echo "Uploading compiled payload archive [$MTAR_FILE] to cTMS Node [$NODE_NAME]..."
 
-          UPLOAD_URI="${TMS_API_URL}/v2/nodes/${NODE_NAME}/files"
+          # --- KORREKTUR: Endpunkt auf /v2/files geändert und nodeName als Parameter übergeben ---
+          UPLOAD_URI="${TMS_API_URL}/v2/files"
           
-          # Universell kompatible curl-Logik unter Verwendung von mktemp
           RESPONSE_FILE=$(mktemp)
           HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "$UPLOAD_URI" \
             -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Accept: application/json" \
-            -F "file=@$MTAR_FILE")
+            -F "file=@$MTAR_FILE" \
+            -F "nodeName=$NODE_NAME")
 
           BODY=$(cat "$RESPONSE_FILE")
           rm "$RESPONSE_FILE"
