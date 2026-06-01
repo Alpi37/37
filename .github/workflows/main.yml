@@ -122,28 +122,51 @@ jobs:
           echo "::add-mask::$TMS_TOKEN"
 
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
-          echo "Uploading compiled payload archive [$MTAR_FILE] to cTMS Node [$NODE_NAME]..."
+          echo "Uploading compiled payload archive [$MTAR_FILE] to cTMS v2 Storage..."
 
-          # Fixed: Reverted from /v2/files to the supported direct multipart upload endpoint
-          UPLOAD_URI="${TMS_API_URL}/v1/nodes/upload?nodeName=${NODE_NAME}"
-          
+          # 1. Datei in den cTMS Speicher hochladen
+          UPLOAD_URI="${TMS_API_URL}/v2/files"
           RESPONSE_FILE=$(mktemp)
+          
           HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "$UPLOAD_URI" \
             -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Accept: application/json" \
-            -F "file=@$MTAR_FILE") # <-- NUR die Datei im Form-Body belassen
-
+            -F "file=@$MTAR_FILE")
+          
           BODY=$(cat "$RESPONSE_FILE")
           rm "$RESPONSE_FILE"
-
-          echo "Gateway Return Code: $HTTP_CODE"
-          echo "Gateway Body Response: $BODY"
-
-          # Fixed: Accept both 200 OK and 201 Created as successful server responses
+          
           if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
-            echo "CRITICAL: The cTMS Gateway rejected the file upload package."
-            echo "Double check that the 'Allow Content Upload' flag is set to true on Node $NODE_NAME inside your Target Subaccount."
+            echo "CRITICAL: File upload to cTMS storage failed. Server returned: $HTTP_CODE"
+            echo "Response: $BODY"
             exit 1
           fi
-
+          
+          # File ID aus dem JSON extrahieren
+          FILE_ID=$(echo "$BODY" | jq -r '.id')
+          echo "SUCCESS: File uploaded with ID: $FILE_ID"
+          
+          # 2. Datei an den Zielknoten übermitteln
+          echo "Registering File ID [$FILE_ID] to cTMS Node [$NODE_NAME]..."
+          REG_URI="${TMS_API_URL}/v2/nodes/upload"
+          RESPONSE_FILE_REG=$(mktemp)
+          
+          # payload als JSON-Body mitsenden
+          REG_CODE=$(curl -s -o "$RESPONSE_FILE_REG" -w "%{http_code}" -X POST "$REG_URI" \
+            -H "Authorization: Bearer $TMS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "{\"fileId\": \"$FILE_ID\", \"nodeName\": \"$NODE_NAME\"}")
+          
+          BODY_REG=$(cat "$RESPONSE_FILE_REG")
+          rm "$RESPONSE_FILE_REG"
+          
+          echo "Gateway Return Code: $REG_CODE"
+          echo "Gateway Body Response: $BODY_REG"
+          
+          if [ "$REG_CODE" -ne 201 ] && [ "$REG_CODE" -ne 200 ]; then
+            echo "CRITICAL: The cTMS Gateway rejected the node registration."
+            exit 1
+          fi
+          
           echo "SUCCESS: Integration package safely registered into the cTMS import queue!"
