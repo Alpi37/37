@@ -125,14 +125,13 @@ jobs:
           echo "Uploading compiled payload archive [$MTAR_FILE] to cTMS Node [$NODE_NAME]..."
 
           # Fixed: Reverted from /v2/files to the supported direct multipart upload endpoint
-          UPLOAD_URI="${TMS_API_URL}/v1/nodes/upload"
+          UPLOAD_URI="${TMS_API_URL}/v1/nodes/upload?nodeName=${NODE_NAME}"
           
           RESPONSE_FILE=$(mktemp)
           HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "$UPLOAD_URI" \
             -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Accept: application/json" \
-            -F "file=@$MTAR_FILE" \
-            -F "node=$NODE_NAME")
+            -F "file=@$MTAR_FILE") # <-- NUR die Datei im Form-Body belassen
 
           BODY=$(cat "$RESPONSE_FILE")
           rm "$RESPONSE_FILE"
