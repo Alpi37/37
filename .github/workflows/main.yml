@@ -1,19 +1,23 @@
-name: Sync iFlows to Git
+name: Sync iFlows to Git & Deploy via SAP cTMS
+
 on:
   workflow_dispatch:
     inputs:
       package_id:
         description: 'Package ID from Integration Suite'
         required: true
+
 jobs:
-  sync:
+  sync-build-deploy:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
+      # 1. Authentifizierung gegen die Source Integration Suite (Entwicklung)
       - name: Get Bearer Token
         id: get-token
         env:
@@ -32,6 +36,7 @@ jobs:
           fi
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
+      # 2. iFlows als ZIP-Dateien aus SAP herunterladen und lokal entpacken
       - name: Download iFlows from Integration Suite
         run: |
           PACKAGE_ID="${{ github.event.inputs.package_id }}"
@@ -60,6 +65,7 @@ jobs:
             rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
           done
 
+      # 3. Code-Änderungen als "Source of Truth" zurück in das Git-Repository pushen
       - name: Commit and Push
         run: |
           git config user.email "github-actions@github.com"
@@ -73,19 +79,65 @@ jobs:
             git push
           fi
 
-      - name: Build MTAR
+      # 4. Multi-Target Application (MTA) Archiv mit dem SAP Cloud MTA Build Tool bauen
+      - name: Build MTA
         run: |
           npm install -g mbt
           mbt build -t gen
 
-      - name: Deploy to cTMS
-        uses: mauriciolauffer/deploy-to-sap-btp-with-ctms@main
+      # 5. Lokales MTAR-Artefakt zusätzlich in GitHub als Backup sichern
+      - name: Upload MTAR as Artifact
+        uses: actions/upload-artifact@v4
         with:
-          CTMS_TOKEN_SERVICE_URL: ${{ secrets.TMS_TOKEN_URL }}
-          CTMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
-          CTMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
-          CTMS_API_URL: ${{ vars.TMS_URL }}
-          CTMS_NODE_NAME: ${{ vars.TMS_NODE_NAME }}
-          CTMS_FILE_PATH: gen/integration-suite-packages_1.0.0.mtar
-          CTMS_TR_CONTENT_TYPE: MTA
-          CTMS_TR_STORAGE_TYPE: FILE
+          name: transport-package
+          path: gen/*.mtar
+
+      # 6. Kompiliertes MTAR-Archiv via API direkt an das cTMS im Target-Subaccount übergeben
+      - name: Upload Built MTAR to cTMS Target Node
+        env:
+          TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
+          TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
+          TMS_TOKEN_URL: ${{ secrets.TMS_TOKEN_URL }}
+          TMS_API_URL: ${{ vars.TMS_URL }}
+          NODE_NAME: "ACX_SOURCE"
+        run: |
+          echo "Requesting handshake token from Target cTMS instance..."
+          
+          TOKEN_RAW=$(curl -s -X POST "$TMS_TOKEN_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$TMS_CLIENT_ID" \
+            --data-urlencode "client_secret=$TMS_CLIENT_SECRET")
+          
+          TMS_TOKEN=$(echo "$TOKEN_RAW" | jq -r '.access_token')
+          if [ "$TMS_TOKEN" == "null" ] || [ -z "$TMS_TOKEN" ]; then
+            echo "Authentication against Target cTMS endpoint failed. Details: $TOKEN_RAW"
+            exit 1
+          fi
+          echo "::add-mask::$TMS_TOKEN"
+
+          MTAR_FILE=$(ls gen/*.mtar | head -n 1)
+          echo "Uploading compiled payload archive [$MTAR_FILE] to cTMS Node [$NODE_NAME]..."
+
+          UPLOAD_URI="${TMS_API_URL}/v2/nodes/${NODE_NAME}/files"
+          
+          # Universell kompatible curl-Logik unter Verwendung von mktemp
+          RESPONSE_FILE=$(mktemp)
+          HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "$UPLOAD_URI" \
+            -H "Authorization: Bearer $TMS_TOKEN" \
+            -H "Accept: application/json" \
+            -F "file=@$MTAR_FILE")
+
+          BODY=$(cat "$RESPONSE_FILE")
+          rm "$RESPONSE_FILE"
+
+          echo "Gateway Return Code: $HTTP_CODE"
+          echo "Gateway Body Response: $BODY"
+
+          if [ "$HTTP_CODE" -ne 201 ]; then
+            echo "CRITICAL: The cTMS Gateway rejected the file upload package."
+            echo "Double check that the 'Allow Content Upload' flag is set to true on Node $NODE_NAME inside your Target Subaccount."
+            exit 1
+          fi
+
+          echo "SUCCESS: Integration package safely registered into the cTMS import queue!"
