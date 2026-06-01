@@ -86,6 +86,6 @@ jobs:
           CTMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
           CTMS_API_URL: ${{ vars.TMS_URL }}
           CTMS_NODE_NAME: ${{ vars.TMS_NODE_NAME }}
-          CTMS_FILE_PATH: ${{ github.workspace }}/gen/integration-suite-packages_1.0.0.mtar
+          CTMS_FILE_PATH: gen/integration-suite-packages_1.0.0.mtar
           CTMS_TR_CONTENT_TYPE: MTA
           CTMS_TR_STORAGE_TYPE: FILE
