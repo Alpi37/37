@@ -124,7 +124,7 @@ jobs:
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
           echo "Uploading compiled payload archive [$MTAR_FILE] to cTMS Node [$NODE_NAME]..."
 
-          # --- CHANGED: Swapped /v2/files to the correct /v1/files/upload path ---
+          # Fixed: Reverted from /v2/files to the supported direct multipart upload endpoint
           UPLOAD_URI="${TMS_API_URL}/v1/files/upload"
           
           RESPONSE_FILE=$(mktemp)
@@ -140,8 +140,8 @@ jobs:
           echo "Gateway Return Code: $HTTP_CODE"
           echo "Gateway Body Response: $BODY"
 
-          # Note: v1/files/upload returns a 201 Created on successful registration
-          if [ "$HTTP_CODE" -ne 201 ]; then
+          # Fixed: Accept both 200 OK and 201 Created as successful server responses
+          if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
             echo "CRITICAL: The cTMS Gateway rejected the file upload package."
             echo "Double check that the 'Allow Content Upload' flag is set to true on Node $NODE_NAME inside your Target Subaccount."
             exit 1
