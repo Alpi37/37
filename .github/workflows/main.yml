@@ -98,7 +98,6 @@ jobs:
           name: transport-package
           path: gen/*.mtar
 
-      # 6. Kompiliertes MTAR-Archiv via API direkt an das cTMS im Target-Subaccount übergeben
       - name: Upload Built MTAR to cTMS Target Node
         env:
           TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
@@ -125,7 +124,8 @@ jobs:
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
           echo "Uploading compiled payload archive [$MTAR_FILE] to cTMS Node [$NODE_NAME]..."
 
-          UPLOAD_URI="${TMS_API_URL}/v2/files"
+          # --- CHANGED: Swapped /v2/files to the correct /v1/files/upload path ---
+          UPLOAD_URI="${TMS_API_URL}/v1/files/upload"
           
           RESPONSE_FILE=$(mktemp)
           HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "$UPLOAD_URI" \
@@ -140,6 +140,7 @@ jobs:
           echo "Gateway Return Code: $HTTP_CODE"
           echo "Gateway Body Response: $BODY"
 
+          # Note: v1/files/upload returns a 201 Created on successful registration
           if [ "$HTTP_CODE" -ne 201 ]; then
             echo "CRITICAL: The cTMS Gateway rejected the file upload package."
             echo "Double check that the 'Allow Content Upload' flag is set to true on Node $NODE_NAME inside your Target Subaccount."
