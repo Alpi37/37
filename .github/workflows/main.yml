@@ -1,94 +1,90 @@
 name: Sync iFlows to Git
-
 on:
-    workflow_dispatch:
-      inputs:
-        package_id:
-          description: 'Package ID from Integration Suite'
-          required: true
-
+  workflow_dispatch:
+    inputs:
+      package_id:
+        description: 'Package ID from Integration Suite'
+        required: true
 jobs:
-    sync:
-      runs-on: ubuntu-latest
-      permissions:
-        contents: write
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
 
-      steps:
-         - name: Checkout this repo
-           uses: actions/checkout@v4
+      - name: Get Bearer Token
+        id: get-token
+        env:
+          BTP_CLIENT_ID: ${{ secrets.IAS_CLIENTID }}
+          BTP_CLIENT_SECRET: ${{ secrets.IAS_CLIENTSECRET }}
+        run: |
+          RESPONSE=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$BTP_CLIENT_ID" \
+            --data-urlencode "client_secret=$BTP_CLIENT_SECRET")
+          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+            echo "Auth failed. Response: $RESPONSE"
+            exit 1
+          fi
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-         - name: Get Bearer Token
-           id: get-token
-           env:
-            BTP_CLIENT_ID: ${{ secrets.IAS_CLIENTID }}
-            BTP_CLIENT_SECRET: ${{ secrets.IAS_CLIENTSECRET }}
-           run: |
-            RESPONSE=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
-              -H "Content-Type: application/x-www-form-urlencoded" \
-              --data-urlencode "grant_type=client_credentials" \
-              --data-urlencode "client_id=$BTP_CLIENT_ID" \
-              --data-urlencode "client_secret=$BTP_CLIENT_SECRET")
-
-            TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
-
-            if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
-              echo "Auth failed. Response: $RESPONSE"
-              exit 1
-            fi
-            echo "token=$TOKEN" >> $GITHUB_OUTPUT
-
-         - name: Download iFlows from Integration Suite
-           run: |
-            PACKAGE_ID="${{ github.event.inputs.package_id }}"
-            mkdir -p "iflows/$PACKAGE_ID"
-
-            RESPONSE=$(curl -s \
-              "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
+      - name: Download iFlows from Integration Suite
+        run: |
+          PACKAGE_ID="${{ github.event.inputs.package_id }}"
+          mkdir -p "iflows/$PACKAGE_ID"
+          RESPONSE=$(curl -s \
+            "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
+            -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
+            -H "Accept: application/json")
+          if [[ ! "$RESPONSE" == \{* ]]; then
+            echo "Error: SAP did not return JSON. Response was:"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id')
+          if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
+            echo "No iFlows found in package $PACKAGE_ID"
+            exit 1
+          fi
+          for IFLOW_ID in $IFLOWS; do
+            echo "Downloading: $IFLOW_ID"
+            curl -s \
+              "${{ vars.CPI_HOST }}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
               -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
-              -H "Accept: application/json")
+              -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+            unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
+            rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+          done
 
-            if [[ ! "$RESPONSE" == \{* ]]; then
-              echo "Error: SAP did not return JSON. Response was:"
-              echo "$RESPONSE"
-              exit 1
-            fi
+      - name: Commit and Push
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
+          git add iflows/
+          if git diff --staged --quiet; then
+            echo "No changes detected."
+          else
+            git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }}"
+            git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}
+            git push
+          fi
 
-            IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id')
+      - name: Build MTAR
+        run: |
+          npm install -g mbt
+          mbt build -t gen
 
-            if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
-              echo "No iFlows found in package $PACKAGE_ID"
-              exit 1
-            fi
-
-            for IFLOW_ID in $IFLOWS; do
-              echo "Downloading: $IFLOW_ID"
-              curl -s \
-                "${{ vars.CPI_HOST }}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
-                -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
-                -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
-
-              unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
-              rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
-            done
-
-         - name: Commit and Push
-           run: |
-            git config user.email "github-actions@github.com"
-            git config user.name "github-actions"
-            git add iflows/
-            if git diff --staged --quiet; then
-              echo "No changes detected."
-            else
-              git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }}"
-              git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}
-              git push
-            fi
-         - name: Build MTA
-           run: |
-            npm install -g mbt
-            mbt build -t gen
-         - name: Upload MTAR as Artifact
-           uses: actions/upload-artifact@v4
-           with:
-             name: transport-package
-             path: gen/*.mtar
+      # ← HIER ersetzt: statt Upload Artifact jetzt direkt zu cTMS
+      - name: Deploy to cTMS
+        uses: mauriciolauffer/deploy-to-sap-btp-with-ctms@main
+        with:
+          CTMS_TOKEN_URL: ${{ secrets.TMS_TOKEN_URL }}
+          CTMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
+          CTMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
+          CTMS_BASE_URL: ${{ vars.TMS_URL }}
+          CTMS_TARGET_NODE: ${{ vars.TMS_NODE_NAME }}
+          CTMS_MTA_PATH: gen
