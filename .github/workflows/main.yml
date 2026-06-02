@@ -15,7 +15,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # --- 2. AUTHENTIFIZIERUNG GEGEN SOURCE CPI ---
+      # --- 2. AUTHENTIFIZIERUNG GEGEN SOURCE CPI (IAS-Credentials) ---
       - name: Authenticate against Source CPI
         id: source_auth
         env:
@@ -108,7 +108,7 @@ jobs:
         env:
           TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
           TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
-          TOKEN_URL: ${{ vars.BTP_TOKEN_URL }}
+          TOKEN_URL: ${{ vars.TMS_TOKEN_URL }}/oauth/token
         run: |
           RESPONSE=$(curl -s -X POST "$TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
@@ -123,10 +123,10 @@ jobs:
           fi
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-      # --- 6. DIREKTES DEPLOYMENT DES ZIP-ARTEFAKTS INS TARGET ---
+      # --- 6. DIREKTES DEPLOYMENT DES ZIP-ARTEFAKTS INS TARGET VIA cTMS ---
       - name: Deploy Direct ZIP to Target via cTMS
         env:
-          NODE_NAME: "ACX_TARGET"
+          NODE_NAME: "ACX_TARGET" 
           TMS_API_URL: ${{ vars.TMS_URL }}
         run: |
           PACKAGE_ID="AY"
