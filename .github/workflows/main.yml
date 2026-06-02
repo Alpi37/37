@@ -88,7 +88,8 @@ jobs:
           done
 
       # --- 4. ÄNDERUNGEN INS GIT REPOSITORY PUSHEN ---
-      - name: Commit and Push to GitHub
+      # --- GIT COMMIT UND PUSH MIT REBASE SCHUTZ ---
+      - name: Commit and Push changes
         run: |
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
@@ -98,7 +99,13 @@ jobs:
             echo "Keine Änderungen im iFlow festgestellt."
           else
             git commit -m "Sync iFlow from Source [skip ci]"
-            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/Alpi37/37.git
+            
+            # HIER DIE RETTUNG: Erst die neuesten Server-Änderungen holen und eigenen Commit oben aufsetzen
+            echo "Hole aktuelle Änderungen vom Server..."
+            git pull origin main --rebase
+            
+            echo "Push changes to GitHub..."
             git push origin main
           fi
 
