@@ -19,7 +19,7 @@ jobs:
       - name: Checkout this repo
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # Holt die gesamte Historie, wichtig für saubere Pull/Rebases
+          fetch-depth: 0
 
       # --- 2. AUTHENTIFIZIERUNG GEGEN SOURCE CPI (ENTWICKLUNG) ---
       - name: Get Bearer Token for Source CPI
@@ -76,7 +76,6 @@ jobs:
               -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
               -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
             
-            # Für die lesbare Git-History lokal entpacken
             unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
             rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
           done
@@ -92,14 +91,8 @@ jobs:
             echo "Keine Änderungen im iFlow-Code festgestellt. Überspringe Push."
           else
             git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }} [skip ci]"
-            
-            # Authentifizierter Remote-Pfad
             git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}.git
-            
-            echo "Hole aktuelle Server-Änderungen ab, um Konflikte zu vermeiden (Rebase)..."
             git pull origin main --rebase
-            
-            echo "Pushe aktualisierten Code ins Git-Repository..."
             git push origin main
           fi
 
@@ -109,7 +102,7 @@ jobs:
           npm install -g mbt
           mbt build -t gen
 
-      # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN (BACKUP) ---
+      # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN ---
       - name: Upload MTAR as Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -121,7 +114,7 @@ jobs:
         env:
           TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
           TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
-          TMS_TOKEN_URL: ${{ vars.TMS_TOKEN_URL }} # FIX: Geändert von secrets zu vars
+          TMS_TOKEN_URL: ${{ vars.TMS_TOKEN_URL }}
           TMS_API_URL: ${{ vars.TMS_URL }}
           NODE_NAME: "ACX_TARGET"
         run: |
@@ -134,7 +127,7 @@ jobs:
           
           TMS_TOKEN=$(echo "$TOKEN_RAW" | jq -r '.access_token')
           if [ "$TMS_TOKEN" == "null" ] || [ -z "$TMS_TOKEN" ]; then
-            echo "CRITICAL: Authentifizierung am Target cTMS fehlgeschlagen: $TOKEN_RAW"
+            echo "CRITICAL: Authentifizierung am Target cTMS failed: $TOKEN_RAW"
             exit 1
           fi
           
@@ -156,8 +149,17 @@ jobs:
             exit 1
           fi
           
-          # Die generierte ID holen
-          FILE_ID=$(echo "$BODY" | jq -r '.id')
+          # Debug: Zeige die komplette Response von SAP im Log an
+          echo "DEBUG: cTMS Upload Response: $BODY"
+          
+          # Die generierte ID holen - probiert verschiedene SAP-Namenskonventionen
+          FILE_ID=$(echo "$BODY" | jq -r '.id // .fileId // .Id // empty' 2>/dev/null)
+          
+          if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
+            echo "CRITICAL: Keine File-ID in der cTMS-Response erhalten. Response: $BODY"
+            exit 1
+          fi
+          
           echo "SUCCESS: Datei im Speicher abgelegt. cTMS File-ID ist: $FILE_ID"
           
           # STUFE 2: Datei per API an die Queue des Zielknotens binden
