@@ -9,7 +9,6 @@ on:
         default: 'AY'
 
 env:
-  # Verhindert die Node.js 20 Deprecation-Warnung und erzwingt das neuere Node.js 24
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -45,7 +44,6 @@ jobs:
             echo "CRITICAL: Auth an Source CPI fehlgeschlagen. Response: $RESPONSE"
             exit 1
           fi
-          echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
       # --- 3. IFLOWS AUTOMATISCH HERUNTERLADEN & ENTPACKEN ---
@@ -135,9 +133,9 @@ jobs:
             echo "CRITICAL: Authentifizierung am Target cTMS failed: $TOKEN_RAW"
             exit 1
           fi
-          echo "::add-mask::$TMS_TOKEN"
           
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
+          MTAR_NAME=$(basename "$MTAR_FILE")
           
           # STUFE 1: In den Dateispeicher hochladen
           echo "Lade Paket [$MTAR_FILE] in den cTMS-Speicher hoch..."
@@ -156,7 +154,6 @@ jobs:
           fi
           
           echo "DEBUG: cTMS Upload Response: $BODY"
-          
           FILE_ID=$(echo "$BODY" | jq -r '.fileId // .id // .Id // empty' 2>/dev/null)
           
           if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
@@ -166,17 +163,19 @@ jobs:
           
           echo "SUCCESS: Datei im Speicher abgelegt. cTMS File-ID ist: $FILE_ID"
           
-          # STUFE 2: Datei per API an die Queue des Zielknotens binden
+          # STUFE 2: Datei per API an die Queue des Zielknotens binden mit vollständigem Payload
           echo "Füge Datei [$FILE_ID] der Import-Queue von Knoten [$NODE_NAME] hinzu..."
           ATTACH_RESPONSE=$(mktemp)
           
-          # Robustes Payload-Design mittels cat <<EOF, um JSON-Parser-Konflikte zu unterbinden
           PAYLOAD=$(cat <<EOF
           {
             "entries": [
               {
                 "nodeName": "${NODE_NAME}",
-                "fileId": ${FILE_ID}
+                "fileId": ${FILE_ID},
+                "storageType": "FILE",
+                "contentType": "MTA",
+                "uri": "${MTAR_NAME}"
               }
             ]
           }
