@@ -167,20 +167,8 @@ jobs:
           echo "Füge Datei [$FILE_ID] der Import-Queue von Knoten [$NODE_NAME] hinzu..."
           ATTACH_RESPONSE=$(mktemp)
           
-          PAYLOAD=$(cat <<EOF
-          {
-            "entries": [
-              {
-                "nodeName": "${NODE_NAME}",
-                "fileId": ${FILE_ID},
-                "storageType": "FILE",
-                "contentType": "MTA",
-                "uri": "${MTAR_NAME}"
-              }
-            ]
-          }
-          EOF
-          )
+          # Echte, saubere JSON-Zeile ohne versteckte Whitespace-Bytes
+          PAYLOAD="{\"entries\":[{\"nodeName\":\"${NODE_NAME}\",\"fileId\":${FILE_ID},\"storageType\":\"FILE\",\"contentType\":\"MTA\",\"uri\":\"${MTAR_NAME}\"}]}"
           
           ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload" \
             -H "Authorization: Bearer $TMS_TOKEN" \
