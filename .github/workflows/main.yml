@@ -1,7 +1,7 @@
 name: SAP iFlow Sync & cTMS Deployment Pipeline
 
 on:
-  workflow_dispatch: # Ermöglicht den manuellen Start über die GitHub-Oberfläche
+  workflow_dispatch:
     inputs:
       iflow_id:
         description: 'Spezifische iFlow ID (leer lassen für alle/Standard)'
@@ -28,18 +28,31 @@ jobs:
         uses: actions/checkout@v4
 
       # -----------------------------------------
-      # STEP 1: AUTHENTIFIZIERUNG AN SAP CPI / INTEGRATION SUITE
+      # STEP 1: AUTHENTIFIZIERUNG AN SAP CPI / INTEGRATION SUITE (FIXED)
       # -----------------------------------------
       - name: Get SAP CPI OAuth Token
         id: cpi_auth
         run: |
           echo "Hole OAuth Token für Integration Suite..."
-          RESPONSE=$(curl -s -X POST "${{ secrets.CPI_TOKEN_URL }}" \
-            -u "${{ secrets.CPI_CLIENT_ID }}:${{ secrets.CPI_CLIENT_SECRET }}" \
-            -d "grant_type=client_credentials")
           
-          TOKEN=$(echo $RESPONSE | jq -r '.access_token')
-          if [ "$TOKEN" = "null" ]; then echo "Fehler beim CPI-Auth"; exit 1; fi
+          # Trenner prüfen, falls die URL in den Secrets schon Parameter enthält
+          if [[ "${{ secrets.CPI_TOKEN_URL }}" == *"\?"* ]]; then
+            URL="${{ secrets.CPI_TOKEN_URL }}&grant_type=client_credentials"
+          else
+            URL="${{ secrets.CPI_TOKEN_URL }}?grant_type=client_credentials"
+          fi
+
+          RESPONSE=$(curl -s -X POST "$URL" \
+            -u "${{ secrets.CPI_CLIENT_ID }}:${{ secrets.CPI_CLIENT_SECRET }}")
+          
+          TOKEN=$(echo $RESPONSE | jq -r '.access_token // empty')
+          
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "❌ FEHLER beim CPI-Auth! Antwort von SAP:"
+            echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"
+            exit 1
+          fi
+          
           echo "::add-mask::$TOKEN"
           echo "cpi_token=$TOKEN" >> $GITHUB_OUTPUT
 
