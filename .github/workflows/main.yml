@@ -126,7 +126,7 @@ jobs:
       # --- 6. DIREKTES DEPLOYMENT DES ZIP-ARTEFAKTS INS TARGET VIA cTMS ---
       - name: Deploy Direct ZIP to Target via cTMS
         env:
-          NODE_NAME: "ACX_TARGET" 
+          NODE_NAME: "ACX_TARGET" # <-- BITTE PRÜFEN: Heißt dein Node in cTMS exakt so?
           TMS_API_URL: ${{ vars.TMS_URL }}
         run: |
           PACKAGE_ID="AY"
@@ -142,10 +142,10 @@ jobs:
           echo "Sende Direkt-ZIP an cTMS Target-Node [$NODE_NAME]: $ZIP_PATH"
           RESPONSE_FILE=$(mktemp)
           
+          # Wir entfernen temporär das harte --fail, um den echten SAP-Fehler im BODY zu fangen
           HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload?nodeName=${NODE_NAME}" \
             -H "Authorization: Bearer ${{ steps.target_auth.outputs.token }}" \
-            -F "file=@${ZIP_PATH};filename=${ZIP_NAME};type=application/zip" \
-            --fail-with-body)
+            -F "file=@${ZIP_PATH};filename=${ZIP_NAME};type=application/zip")
           
           BODY=$(cat "$RESPONSE_FILE")
           rm "$RESPONSE_FILE"
@@ -153,8 +153,9 @@ jobs:
           echo "cTMS Response Code: $HTTP_CODE"
           echo "cTMS Response Body: $BODY"
           
+          # Hier prüfen wir den HTTP-Code manuell, damit das Log vorher gedruckt wird
           if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
-            echo "CRITICAL: Target Deployment über cTMS fehlgeschlagen!"
+            echo "CRITICAL: Target Deployment über cTMS fehlgeschlagen! Grund siehe cTMS Response Body oben."
             exit 1
           fi
           
