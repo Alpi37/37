@@ -1,139 +1,204 @@
-name: SAP iFlow Sync & cTMS Deployment Pipeline
+name: Sync iFlows to Git & Deploy via SAP cTMS
 
 on:
   workflow_dispatch:
     inputs:
-      iflow_id:
-        description: 'Spezifische iFlow ID (leer lassen für alle/Standard)'
-        required: false
-        default: ''
+      package_id:
+        description: 'Package ID aus der Integration Suite (z.B. AY)'
+        required: true
+        default: 'AY'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  sync-and-transport:
+  sync-build-deploy:
     runs-on: ubuntu-latest
-
-    env:
-      # SAP Integration Suite (CPI) Credentials / API
-      CPI_HOST: "deine-cpi-tenant-api.cfapps.eu10.hana.ondemand.com"
-      CPI_PACKAGE_ID: "DeinIntegrationPackage"
-      CPI_IFLOW_ID: ${{ github.event.inputs.iflow_id || 'DeinStandardIFlow' }}
-      
-      # cTMS Credentials (aus dem Service Key extrahiert)
-      CTMS_AUTH_URL: "https://dein-ctms-uaa.authentication.eu10.hana.ondemand.com/oauth/token"
-      CTMS_API_URL: "https://transport-service-app-router.cfapps.eu10.hana.ondemand.com/v1"
-      CTMS_NODE_NAME: "DEV_TO_TEST" # Dein definierter cTMS Node
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout Repository
+      # --- 1. REPOSITORY AUSCHECKEN ---
+      - name: Checkout this repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # -----------------------------------------
-      # STEP 1: AUTHENTIFIZIERUNG AN SAP CPI / INTEGRATION SUITE (FIXED)
-      # -----------------------------------------
-      - name: Get SAP CPI OAuth Token
-        id: cpi_auth
+      # --- 2. AUTHENTIFIZIERUNG GEGEN SOURCE CPI (ENTWICKLUNG) ---
+      - name: Get Bearer Token for Source CPI
+        id: get-token
+        env:
+          BTP_CLIENT_ID: ${{ secrets.IAS_CLIENTID }}
+          BTP_CLIENT_SECRET: ${{ secrets.IAS_CLIENTSECRET }}
+          TOKEN_URL: ${{ vars.BTP_TOKEN_URL }}
         run: |
-          echo "Hole OAuth Token für Integration Suite..."
+          echo "Fordere Token von der Source-Instanz an..."
+          RESPONSE=$(curl -s -X POST "$TOKEN_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$BTP_CLIENT_ID" \
+            --data-urlencode "client_secret=$BTP_CLIENT_SECRET")
           
-          # Trenner prüfen, falls die URL in den Secrets schon Parameter enthält
-          if [[ "${{ secrets.CPI_TOKEN_URL }}" == *"\?"* ]]; then
-            URL="${{ secrets.CPI_TOKEN_URL }}&grant_type=client_credentials"
-          else
-            URL="${{ secrets.CPI_TOKEN_URL }}?grant_type=client_credentials"
+          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+            echo "CRITICAL: Auth an Source CPI fehlgeschlagen. Response: $RESPONSE"
+            exit 1
           fi
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-          RESPONSE=$(curl -s -X POST "$URL" \
-            -u "${{ secrets.CPI_CLIENT_ID }}:${{ secrets.CPI_CLIENT_SECRET }}")
+      # --- 3. IFLOWS AUTOMATISCH HERUNTERLADEN & ENTPACKEN ---
+      - name: Download iFlows from Integration Suite
+        env:
+          CPI_HOST: ${{ vars.CPI_HOST }}
+        run: |
+          PACKAGE_ID="${{ github.event.inputs.package_id }}"
+          mkdir -p "iflows/$PACKAGE_ID"
           
-          TOKEN=$(echo $RESPONSE | jq -r '.access_token // empty')
+          echo "Frage verknüpfte iFlows für Paket [$PACKAGE_ID] ab..."
+          RESPONSE=$(curl -s \
+            "${CPI_HOST}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
+            -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
+            -H "Accept: application/json")
           
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "❌ FEHLER beim CPI-Auth! Antwort von SAP:"
-            echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"
+          if [[ ! "$RESPONSE" == \{* ]]; then
+            echo "CRITICAL: SAP hat kein valides JSON zurückgegeben. Antwort:"
+            echo "$RESPONSE"
             exit 1
           fi
           
-          echo "::add-mask::$TOKEN"
-          echo "cpi_token=$TOKEN" >> $GITHUB_OUTPUT
+          IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id' 2>/dev/null)
+          if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
+            echo "CRITICAL: Keine iFlows im Paket $PACKAGE_ID gefunden oder API-Struktur weicht ab."
+            exit 1
+          fi
+          
+          for IFLOW_ID in $IFLOWS; do
+            echo "Lade iFlow herunter: $IFLOW_ID"
+            curl -s \
+              "${CPI_HOST}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+              -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
+              -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+            
+            unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
+            rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+          done
 
-      # -----------------------------------------
-      # STEP 2: IFLOW HERUNTERLADEN (EXPORT)
-      # -----------------------------------------
-      - name: Fetch iFlow Artifact (ZIP)
+      # --- 4. GIT COMMIT UND PUSH (MIT REBASE-SCHUTZ) ---
+      - name: Commit and Push changes to GitHub
         run: |
-          echo "Lade iFlow ${{ env.CPI_IFLOW_ID }} herunter..."
-          
-          # Ordnerstruktur vorbereiten
-          mkdir -p iflows/${{ env.CPI_IFLOW_ID }}
-          
-          # API-Aufruf zum Download des iFlow-Bundles (ZIP)
-          curl -s -X GET "https://${{ env.CPI_HOST }}/api/v1/IntegrationDesigntimeArtifacts(Id='${{ env.CPI_IFLOW_ID }}',Version='active')/\$value" \
-            -H "Authorization: Bearer ${{ steps.cpi_auth.outputs.cpi_token }}" \
-            --output iflows/${{ env.CPI_IFLOW_ID }}/${{ env.CPI_IFLOW_ID }}.zip
-
-      # -----------------------------------------
-      # STEP 3: REPO AKTUALISIEREN & PUSHEN
-      # -----------------------------------------
-      - name: Commit and Push to Git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
           git add iflows/
           
-          # Nur committen, wenn es tatsächliche Änderungen gibt
           if git diff --staged --quiet; then
-            echo "Keine Änderungen am iFlow festgestellt."
+            echo "Keine Änderungen im iFlow-Code festgestellt. Überspringe Push."
           else
-            git commit -m "Automated Sync: iFlow ${{ env.CPI_IFLOW_ID }} aktualisiert [skip ci]"
+            git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }} [skip ci]"
+            git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}.git
+            git pull origin main --rebase
             git push origin main
           fi
 
-      # -----------------------------------------
-      # STEP 4: AUTHENTIFIZIERUNG AM SAP cTMS
-      # -----------------------------------------
-      - name: Get SAP cTMS OAuth Token
-        id: ctms_auth
+      # --- 5. MTA ARCHIV (MTAR) BAUEN ---
+      - name: Build MTA Archive
         run: |
-          echo "Hole OAuth Token für SAP cTMS..."
-          RESPONSE=$(curl -s -X POST "${{ env.CTMS_AUTH_URL }}" \
-            -u "${{ secrets.CTMS_CLIENT_ID }}:${{ secrets.CTMS_CLIENT_SECRET }}" \
-            -d "grant_type=client_credentials")
-          
-          TOKEN=$(echo $RESPONSE | jq -r '.access_token')
-          if [ "$TOKEN" = "null" ]; then echo "Fehler beim cTMS-Auth"; exit 1; fi
-          echo "::add-mask::$TOKEN"
-          echo "ctms_token=$TOKEN" >> $GITHUB_OUTPUT
+          npm install -g mbt
+          mbt build -t gen
 
-      # -----------------------------------------
-      # STEP 5: ARTEFAKT IN cTMS HOCHLADEN & DER QUEUE HINZUFÜGEN
-      # -----------------------------------------
-      - name: Upload Artifact and Inject into cTMS Queue
+      # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN ---
+      - name: Upload MTAR as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transport-package
+          path: gen/*.mtar
+
+      # --- 7. DIREKTER ZWEISTUFIGER CTMS UPLOAD & QUEUE INJEKTION ---
+      - name: Upload Built MTAR and Attach to cTMS Target Node
+        env:
+          TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
+          TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
+          TMS_TOKEN_URL: ${{ vars.TMS_TOKEN_URL }}
+          TMS_API_URL: ${{ vars.TMS_URL }}
+          NODE_NAME: "ACX_TARGET"
         run: |
-          FILE_PATH="iflows/${{ env.CPI_IFLOW_ID }}/${{ env.CPI_IFLOW_ID }}.zip"
-          echo "Füge $FILE_PATH der cTMS-Queue für Node ${{ env.CTMS_NODE_NAME }} hinzu..."
+          echo "Handshake mit Target cTMS-Instanz..."
+          TOKEN_RAW=$(curl -s -X POST "$TMS_TOKEN_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$TMS_CLIENT_ID" \
+            --data-urlencode "client_secret=$TMS_CLIENT_SECRET")
           
-          # 1. Datei hochladen, um eine File-ID zu generieren
-          UPLOAD_RESPONSE=$(curl -s -X POST "${{ env.CTMS_API_URL }}/files" \
-            -H "Authorization: Bearer ${{ steps.ctms_auth.outputs.ctms_token }}" \
-            -F "file=@$FILE_PATH")
+          TMS_TOKEN=$(echo "$TOKEN_RAW" | jq -r '.access_token')
+          if [ "$TMS_TOKEN" == "null" ] || [ -z "$TMS_TOKEN" ]; then
+            echo "CRITICAL: Authentifizierung am Target cTMS failed: $TOKEN_RAW"
+            exit 1
+          fi
           
-          FILE_ID=$(echo $UPLOAD_RESPONSE | jq -r '.fileId')
-          echo "Datei erfolgreich hochgeladen. cTMS File ID: $FILE_ID"
+          MTAR_FILE=$(ls gen/*.mtar | head -n 1)
+          MTAR_NAME=$(basename "$MTAR_FILE")
           
-          # 2. Transport-Request erstellen und in die Queue des Ziel-Nodes schieben
-          NODES_JSON=$(jq -n --arg node "${{ env.CTMS_NODE_NAME }}" '[$node]')
+          # STUFE 1: In den Dateispeicher hochladen
+          echo "Lade Paket [$MTAR_FILE] in den cTMS-Speicher hoch..."
+          RESPONSE_FILE=$(mktemp)
+          HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/files/upload" \
+            -H "Authorization: Bearer $TMS_TOKEN" \
+            -H "Accept: application/json" \
+            -F "file=@$MTAR_FILE")
           
-          REQ_BODY=$(jq -n \
-            --arg desc "GitHub Deployment: iFlow ${{ env.CPI_IFLOW_ID }}" \
-            --arg fileId "$FILE_ID" \
-            --argjson nodes "$NODES_JSON" \
-            '{description: $desc, fileId: $fileId, nodeNames: $nodes}')
-            
-          QUEUE_RESPONSE=$(curl -s -X POST "${{ env.CTMS_API_URL }}/nodes/upload" \
-            -H "Authorization: Bearer ${{ steps.ctms_auth.outputs.ctms_token }}" \
+          BODY=$(cat "$RESPONSE_FILE")
+          rm "$RESPONSE_FILE"
+          
+          if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
+            echo "CRITICAL: cTMS File-Upload abgelehnt. Code: $HTTP_CODE, Response: $BODY"
+            exit 1
+          fi
+          
+          echo "DEBUG: cTMS Upload Response: $BODY"
+          FILE_ID=$(echo "$BODY" | jq -r '.fileId // .id // .Id // empty' 2>/dev/null)
+          
+          if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
+            echo "CRITICAL: Keine File-ID in der cTMS-Response erhalten. Response: $BODY"
+            exit 1
+          fi
+          
+          echo "SUCCESS: Datei im Speicher abgelegt. cTMS File-ID ist: $FILE_ID"
+          
+          # STUFE 2: Datei per API an die Queue des Zielknotens binden mit vollständigem Payload
+          echo "Füge Datei [$FILE_ID] der Import-Queue von Knoten [$NODE_NAME] hinzu..."
+          ATTACH_RESPONSE=$(mktemp)
+          
+          PAYLOAD=$(cat <<EOF
+          {
+            "entries": [
+              {
+                "nodeName": "${NODE_NAME}",
+                "fileId": ${FILE_ID},
+                "storageType": "FILE",
+                "contentType": "MTA",
+                "uri": "${MTAR_NAME}"
+              }
+            ]
+          }
+          EOF
+          )
+          
+          ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload" \
+            -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Content-Type: application/json" \
-            -d "$REQ_BODY")
+            -H "Accept: application/json" \
+            -d "$PAYLOAD")
           
-          echo "cTMS Queue Response:"
-          echo $QUEUE_RESPONSE | jq .
+          ATTACH_BODY=$(cat "$ATTACH_RESPONSE")
+          rm "$ATTACH_RESPONSE"
+          
+          echo "cTMS Gateway Antwort-Code für Queue-Zuweisung: $ATTACH_HTTP_CODE"
+          
+          if [ "$ATTACH_HTTP_CODE" -ne 201 ] && [ "$ATTACH_HTTP_CODE" -ne 200 ]; then
+            echo "CRITICAL: Zuordnung zur Queue fehlgeschlagen! Details: $ATTACH_BODY"
+            exit 1
+          fi
+          
+          echo "=========================================================================="
+          echo "BOOM! Der Transport wurde erfolgreich in die Queue von $NODE_NAME eingereiht!"
+          echo "Du kannst das Paket jetzt im BTP Cockpit sehen und importieren."
+          echo "=========================================================================="
