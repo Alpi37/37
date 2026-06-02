@@ -1,45 +1,33 @@
-name: Sync, Build and Deploy iFlows
+name: Sync iFlows to Git & Deploy via SAP cTMS
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    inputs:
+      package_id:
+        description: 'Package ID aus der Integration Suite (z.B. AY)'
+        required: true
+        default: 'AY'
 
 jobs:
   sync-build-deploy:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout Repository
+      # --- 1. REPOSITORY AUSCHECKEN ---
+      - name: Checkout this repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: GitHub Secrets Validierung
-        run: |
-          echo "=== PRÜFUNG DER GITHUB SECRETS ==="
-          if [ -z "$BTP_CLIENT_ID" ]; then
-            echo "ERROR: 'BTP_CLIENT_ID' ist leer! GitHub stellt das Secret nicht bereit."
-            echo "Bitte prüfe unter Settings -> Secrets -> Actions, ob das Secret existiert."
-            exit 1
-          else
-            echo "OK: 'BTP_CLIENT_ID' wurde von GitHub erfolgreich geladen."
-          fi
-          if [ -z "$BTP_CLIENT_SECRET" ]; then
-            echo "ERROR: 'BTP_CLIENT_SECRET' ist leer!"
-            exit 1
-          fi
-          echo "=================================="
+      # --- 2. AUTHENTIFIZIERUNG GEGEN SOURCE CPI (ENTWICKLUNG) ---
+      - name: Get Bearer Token for Source CPI
+        id: get-token
         env:
-          BTP_CLIENT_ID: ${{ secrets.BTP_CLIENT_ID }}
-          BTP_CLIENT_SECRET: ${{ secrets.BTP_CLIENT_SECRET }}
-
-      - name: Auth an Source CPI
-        id: cpi_auth
+          BTP_CLIENT_ID: ${{ secrets.IAS_CLIENTID }}
+          BTP_CLIENT_SECRET: ${{ secrets.IAS_CLIENTSECRET }}
+          TOKEN_URL: ${{ vars.BTP_TOKEN_URL }}
         run: |
           echo "Fordere Token von der Source-Instanz an..."
           RESPONSE=$(curl -s -X POST "$TOKEN_URL" \
@@ -54,20 +42,19 @@ jobs:
             exit 1
           fi
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
-        env:
-          BTP_CLIENT_ID: ${{ secrets.BTP_CLIENT_ID }}
-          BTP_CLIENT_SECRET: ${{ secrets.BTP_CLIENT_SECRET }}
-          TOKEN_URL: https://bti-payg.authentication.eu10.hana.ondemand.com/oauth/token
 
-      - name: Download iFlows aus SAP Integration Suite
+      # --- 3. IFLOWS AUTOMATISCH HERUNTERLADEN & ENTPACKEN ---
+      - name: Download iFlows from Integration Suite
+        env:
+          CPI_HOST: ${{ vars.CPI_HOST }}
         run: |
-          PACKAGE_ID="AY"
+          PACKAGE_ID="${{ github.event.inputs.package_id }}"
           mkdir -p "iflows/$PACKAGE_ID"
           
           echo "Frage verknüpfte iFlows für Paket [$PACKAGE_ID] ab..."
           RESPONSE=$(curl -s \
             "${CPI_HOST}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
-            -H "Authorization: Bearer ${{ steps.cpi_auth.outputs.token }}" \
+            -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
             -H "Accept: application/json")
           
           if [[ ! "$RESPONSE" == \{* ]]; then
@@ -86,16 +73,15 @@ jobs:
             echo "Lade iFlow herunter: $IFLOW_ID"
             curl -s \
               "${CPI_HOST}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
-              -H "Authorization: Bearer ${{ steps.cpi_auth.outputs.token }}" \
+              -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
               -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
             
             unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
             rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
           done
-        env:
-          CPI_HOST: https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com
 
-      - name: Commit & Push Änderungen (falls vorhanden)
+      # --- 4. GIT COMMIT UND PUSH (MIT REBASE-SCHUTZ) ---
+      - name: Commit and Push changes to GitHub
         run: |
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
@@ -104,24 +90,33 @@ jobs:
           if git diff --staged --quiet; then
             echo "Keine Änderungen im iFlow-Code festgestellt. Überspringe Push."
           else
-            git commit -m "Sync iFlows from package AY [skip ci]"
-            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+            git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }} [skip ci]"
+            git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}.git
             git pull origin main --rebase
             git push origin main
           fi
 
-      - name: Build MTA Archive (MBT)
+      # --- 5. MTA ARCHIV (MTAR) BAUEN ---
+      - name: Build MTA Archive
         run: |
           npm install -g mbt
           mbt build -t gen
 
-      - name: Upload Artifact (Backup in GitHub)
+      # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN ---
+      - name: Upload MTAR as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: transport-package
           path: gen/*.mtar
 
-      - name: Upload & Queue an SAP cTMS
+      # --- 7. DIREKTER ZWEISTUFIGER CTMS UPLOAD & QUEUE INJEKTION ---
+      - name: Upload Built MTAR and Attach to cTMS Target Node
+        env:
+          TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
+          TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
+          TMS_TOKEN_URL: ${{ vars.TMS_TOKEN_URL }}
+          TMS_API_URL: ${{ vars.TMS_URL }}
+          NODE_NAME: "ACX_TARGET"
         run: |
           echo "Handshake mit Target cTMS-Instanz..."
           TOKEN_RAW=$(curl -s -X POST "$TMS_TOKEN_URL" \
@@ -138,6 +133,7 @@ jobs:
           
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
           
+          # STUFE 1: In den Dateispeicher hochladen
           echo "Lade Paket [$MTAR_FILE] in den cTMS-Speicher hoch..."
           RESPONSE_FILE=$(mktemp)
           HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/files/upload" \
@@ -154,6 +150,8 @@ jobs:
           fi
           
           echo "DEBUG: cTMS Upload Response: $BODY"
+          
+          # Die generierte ID holen
           FILE_ID=$(echo "$BODY" | jq -r '.fileId // .id // .Id // empty' 2>/dev/null)
           
           if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
@@ -163,10 +161,11 @@ jobs:
           
           echo "SUCCESS: Datei im Speicher abgelegt. cTMS File-ID ist: $FILE_ID"
           
+          # STUFE 2: Datei per API an die Queue des Zielknotens binden (Korrigiertes JSON mit 'entries'-Array)
           echo "Füge Datei [$FILE_ID] der Import-Queue von Knoten [$NODE_NAME] hinzu..."
           ATTACH_RESPONSE=$(mktemp)
           
-          ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload-file" \
+          ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload" \
             -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
@@ -183,11 +182,6 @@ jobs:
           fi
           
           echo "=========================================================================="
-          echo "Der Transport wurde erfolgreich in die Queue von $NODE_NAME eingereiht!"
+          echo "BOOM! Der Transport wurde erfolgreich in die Queue von $NODE_NAME eingereiht!"
+          echo "Du kannst das Paket jetzt im BTP Cockpit sehen und importieren."
           echo "=========================================================================="
-        env:
-          TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
-          TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
-          TMS_TOKEN_URL: https://achybriddev.authentication.eu10.hana.ondemand.com/oauth/token
-          TMS_API_URL: https://transport-service-app-backend.ts.cfapps.eu10.hana.ondemand.com
-          NODE_NAME: ACX_TARGET
