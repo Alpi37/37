@@ -121,7 +121,7 @@ jobs:
         env:
           TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
           TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
-          TMS_TOKEN_URL: ${{ secrets.TMS_TOKEN_URL }}
+          TMS_TOKEN_URL: ${{ vars.TMS_TOKEN_URL }} # FIX: Geändert von secrets zu vars
           TMS_API_URL: ${{ vars.TMS_URL }}
           NODE_NAME: "ACX_TARGET"
         run: |
@@ -156,11 +156,11 @@ jobs:
             exit 1
           fi
           
-          # Die generierte ID holen (z. B. deine 9272)
+          # Die generierte ID holen
           FILE_ID=$(echo "$BODY" | jq -r '.id')
           echo "SUCCESS: Datei im Speicher abgelegt. cTMS File-ID ist: $FILE_ID"
           
-          # STUFE 2: Datei per API an die Queue des Zielknotens binden (Umgang des UI-MTA-Filters)
+          # STUFE 2: Datei per API an die Queue des Zielknotens binden
           echo "Füge Datei [$FILE_ID] der Import-Queue von Knoten [$NODE_NAME] hinzu..."
           ATTACH_RESPONSE=$(mktemp)
           ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload?nodeName=${NODE_NAME}&fileId=${FILE_ID}" \
