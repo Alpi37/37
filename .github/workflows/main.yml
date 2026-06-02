@@ -169,7 +169,7 @@ jobs:
             -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
-            -d "{\"entries\": [{\"nodeName\": \"${NODE_NAME}\", \"fileId\": ${FILE_ID}}]}")
+            -d "{\"entries\": [{\"nodeName\": \"${NODE_NAME}\", \"fileId\": ${FILE_ID}, \"storageType\": \"FILE\", \"contentType\": \"MTA\", \"uri\": \"\"}]}")
           
           ATTACH_BODY=$(cat "$ATTACH_RESPONSE")
           rm "$ATTACH_RESPONSE"
