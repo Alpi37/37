@@ -15,7 +15,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # --- 2. AUTHENTIFIZIERUNG GEGEN SOURCE CPI (Verwendung der IAS-Credentials) ---
+      # --- 2. AUTHENTIFIZIERUNG GEGEN SOURCE CPI ---
       - name: Authenticate against Source CPI
         id: source_auth
         env:
@@ -23,11 +23,6 @@ jobs:
           CPI_CLIENT_SECRET: ${{ secrets.IAS_CLIENTSECRET }}
           TOKEN_URL: ${{ vars.BTP_TOKEN_URL }}
         run: |
-          if [ -z "$CPI_CLIENT_ID" ] || [ -z "$CPI_CLIENT_SECRET" ]; then
-            echo "CRITICAL: Secrets für IAS_CLIENTID oder IAS_CLIENTSECRET sind in GitHub nicht gesetzt!"
-            exit 1
-          fi
-
           RESPONSE=$(curl -s -X POST "$TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=client_credentials" \
@@ -41,23 +36,56 @@ jobs:
           fi
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-      # --- 3. IFLOW AUS SOURCE HOCHLADEN & IM REPO SPEICHERN ---
-      - name: Fetch iFlow from Source
+      # --- 3. IFLOWS DYNAMISCH AUS SOURCE LESEN & SPEICHERN ---
+      - name: Fetch iFlows from Source
         env:
           CPI_HOST: ${{ vars.CPI_HOST }}
         run: |
           PACKAGE_ID="AY"
-          IFLOW_ID="ay-package-content"
           mkdir -p "iflows/$PACKAGE_ID"
           
-          echo "Lade iFlow $IFLOW_ID aus Paket $PACKAGE_ID..."
-          curl -s \
-            "${CPI_HOST}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+          echo "Frage verknüpfte iFlows für Paket [$PACKAGE_ID] ab..."
+          RESPONSE=$(curl -s \
+            "${CPI_HOST}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
             -H "Authorization: Bearer ${{ steps.source_auth.outputs.token }}" \
-            -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+            -H "Accept: application/json")
           
-          # Entpacken für die Git-History
-          unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
+          if [[ ! "$RESPONSE" == \{* ]]; then
+            echo "CRITICAL: SAP hat kein JSON zurückgegeben. Fehlermeldung der API:"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          
+          IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id' 2>/dev/null)
+          if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
+            echo "CRITICAL: Keine iFlows im Paket $PACKAGE_ID gefunden oder API-Struktur weicht ab. Antwort:"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          
+          for IFLOW_ID in $IFLOWS; do
+            echo "Gefundenen iFlow herunterladen: $IFLOW_ID"
+            
+            RESPONSE_FILE=$(mktemp)
+            HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+              "${CPI_HOST}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+              -H "Authorization: Bearer ${{ steps.source_auth.outputs.token }}")
+            
+            if [ "$HTTP_CODE" -ne 200 ]; then
+              echo "Fehler beim Download von $IFLOW_ID (HTTP $HTTP_CODE):"
+              cat "$RESPONSE_FILE"
+              rm "$RESPONSE_FILE"
+              exit 1
+            fi
+            
+            mv "$RESPONSE_FILE" "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+            
+            # Entpacken für die Git-History
+            unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
+            
+            # Exportiere die ID für den späteren Deployment-Schritt
+            echo "LAST_DEPLOYED_IFLOW=$IFLOW_ID" >> $GITHUB_ENV
+          done
 
       # --- 4. ÄNDERUNGEN INS GIT REPOSITORY PUSHEN ---
       - name: Commit and Push to GitHub
@@ -82,11 +110,6 @@ jobs:
           TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
           TOKEN_URL: ${{ vars.BTP_TOKEN_URL }}
         run: |
-          if [ -z "$TMS_CLIENT_ID" ] || [ -z "$TMS_CLIENT_SECRET" ]; then
-            echo "CRITICAL: Secrets für TMS_CLIENT_ID oder TMS_CLIENT_SECRET sind in GitHub nicht gesetzt!"
-            exit 1
-          fi
-
           RESPONSE=$(curl -s -X POST "$TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=client_credentials" \
@@ -103,13 +126,18 @@ jobs:
       # --- 6. DIREKTES DEPLOYMENT DES ZIP-ARTEFAKTS INS TARGET ---
       - name: Deploy Direct ZIP to Target via cTMS
         env:
-          NODE_NAME: "ACX_TARGET" # Bleibt fest auf Target oder nutze ggf. ${{ vars.TMS_NODE_NAME }}, falls du in den Source-Node pushen willst
+          NODE_NAME: "ACX_TARGET"
           TMS_API_URL: ${{ vars.TMS_URL }}
         run: |
           PACKAGE_ID="AY"
-          IFLOW_ID="ay-package-content"
+          IFLOW_ID="${{ env.LAST_DEPLOYED_IFLOW }}"
           ZIP_PATH="iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
           ZIP_NAME="${IFLOW_ID}.zip"
+          
+          if [ -z "$IFLOW_ID" ]; then
+            echo "CRITICAL: Es wurde keine iFlow-ID für den Transport übergeben!"
+            exit 1
+          fi
           
           echo "Sende Direkt-ZIP an cTMS Target-Node [$NODE_NAME]: $ZIP_PATH"
           RESPONSE_FILE=$(mktemp)
@@ -130,4 +158,4 @@ jobs:
             exit 1
           fi
           
-          echo "SUCCESS: iFlow wurde erfolgreich via ZIP ins Target transportiert!"
+          echo "SUCCESS: iFlow [$IFLOW_ID] wurde erfolgreich via ZIP ins Target transportiert!"
