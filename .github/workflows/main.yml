@@ -7,7 +7,6 @@ on:
   workflow_dispatch:
 
 env:
-  # Behebt die GitHub-Warnung bezüglich Node.js 20 Deprecation
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -120,7 +119,7 @@ jobs:
           
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
           
-          # STUFE 1: In den Dateispeicher hochladen (Das hat bereits funktioniert)
+          # STUFE 1: In den Dateispeicher hochladen (Das hat bei dir geklappt)
           echo "Lade Paket [$MTAR_FILE] in den cTMS-Speicher hoch..."
           RESPONSE_FILE=$(mktemp)
           HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/files/upload" \
@@ -146,7 +145,7 @@ jobs:
           
           echo "SUCCESS: Datei im Speicher abgelegt. cTMS File-ID ist: $FILE_ID"
           
-          # STUFE 2: Datei an die Queue binden -> FIX: Nutzt jetzt den korrekten /upload-file Endpunkt!
+          # STUFE 2: Datei an die Queue binden (Der korrigierte Endpunkt)
           echo "Füge Datei [$FILE_ID] der Import-Queue von Knoten [$NODE_NAME] hinzu..."
           ATTACH_RESPONSE=$(mktemp)
           
@@ -167,8 +166,7 @@ jobs:
           fi
           
           echo "=========================================================================="
-          echo "BOOM! Der Transport wurde erfolgreich in die Queue von $NODE_NAME eingereiht!"
-          echo "Du kannst das Paket jetzt im BTP Cockpit sehen und importieren."
+          echo "Der Transport wurde erfolgreich in die Queue von $NODE_NAME eingereiht!"
           echo "=========================================================================="
         env:
           TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
