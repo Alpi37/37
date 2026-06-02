@@ -123,40 +123,39 @@ jobs:
           fi
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-      # --- 6. DIREKTES DEPLOYMENT DES ZIP-ARTEFAKTS INS TARGET VIA cTMS ---
-      - name: Deploy Direct ZIP to Target via cTMS
+      # --- 6. TRANSPORT ÜBER SOURCE CPI AN cTMS ÜBERGEBEN ---
+      - name: Trigger SAP Transport via Source CPI
         env:
-          NODE_NAME: "ACX_TARGET" # <-- BITTE PRÜFEN: Heißt dein Node in cTMS exakt so?
-          TMS_API_URL: ${{ vars.TMS_URL }}
+          CPI_HOST: ${{ vars.CPI_HOST }}
+          NODE_NAME: "ACX_TARGET" # Dein cTMS-Zielknoten
         run: |
           PACKAGE_ID="AY"
           IFLOW_ID="${{ env.LAST_DEPLOYED_IFLOW }}"
-          ZIP_PATH="iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
-          ZIP_NAME="${IFLOW_ID}.zip"
           
-          if [ -z "$IFLOW_ID" ]; then
-            echo "CRITICAL: Es wurde keine iFlow-ID für den Transport übergeben!"
-            exit 1
-          fi
+          echo "Triggere SAP-Transport für iFlow [$IFLOW_ID] über die Source-CPI an cTMS Node [$NODE_NAME]..."
           
-          echo "Sende Direkt-ZIP an cTMS Target-Node [$NODE_NAME]: $ZIP_PATH"
+          # Wir schicken einen POST-Befehl an die Source-CPI. 
+          # Diese verpackt den iFlow und übergibt ihn sauber an cTMS.
           RESPONSE_FILE=$(mktemp)
-          
-          # Wir entfernen temporär das harte --fail, um den echten SAP-Fehler im BODY zu fangen
-          HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload?nodeName=${NODE_NAME}" \
-            -H "Authorization: Bearer ${{ steps.target_auth.outputs.token }}" \
-            -F "file=@${ZIP_PATH};filename=${ZIP_NAME};type=application/zip")
+          HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${CPI_HOST}/api/v1/TransportAndDeploy" \
+            -H "Authorization: Bearer ${{ steps.source_auth.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"ArtifactId\": \"${IFLOW_ID}\",
+              \"PackageId\": \"${PACKAGE_ID}\",
+              \"TargetNodeName\": \"${NODE_NAME}\",
+              \"Description\": \"Automated Sync via GitHub Actions\"
+            }")
           
           BODY=$(cat "$RESPONSE_FILE")
           rm "$RESPONSE_FILE"
           
-          echo "cTMS Response Code: $HTTP_CODE"
-          echo "cTMS Response Body: $BODY"
+          echo "SAP Integration Suite Response Code: $HTTP_CODE"
+          echo "SAP Integration Suite Response Body: $BODY"
           
-          # Hier prüfen wir den HTTP-Code manuell, damit das Log vorher gedruckt wird
-          if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
-            echo "CRITICAL: Target Deployment über cTMS fehlgeschlagen! Grund siehe cTMS Response Body oben."
+          if [ "$HTTP_CODE" -ne 200 ] && [ "$HTTP_CODE" -ne 201 ]; then
+            echo "CRITICAL: Transport-Trigger über SAP fehlgeschlagen!"
             exit 1
           fi
           
-          echo "SUCCESS: iFlow [$IFLOW_ID] wurde erfolgreich via ZIP ins Target transportiert!"
+          echo "SUCCESS: Transport wurde erfolgreich in die cTMS-Queue eingereiht!"
