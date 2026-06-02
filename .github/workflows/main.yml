@@ -149,11 +149,10 @@ jobs:
             exit 1
           fi
           
-          # Debug: Zeige die komplette Response von SAP im Log an
           echo "DEBUG: cTMS Upload Response: $BODY"
           
-          # Die generierte ID holen - probiert verschiedene SAP-Namenskonventionen
-          FILE_ID=$(echo "$BODY" | jq -r '.id // .fileId // .Id // empty' 2>/dev/null)
+          # Die generierte ID holen (.fileId hatte in deinem Log "9337")
+          FILE_ID=$(echo "$BODY" | jq -r '.fileId // .id // .Id // empty' 2>/dev/null)
           
           if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
             echo "CRITICAL: Keine File-ID in der cTMS-Response erhalten. Response: $BODY"
@@ -162,12 +161,15 @@ jobs:
           
           echo "SUCCESS: Datei im Speicher abgelegt. cTMS File-ID ist: $FILE_ID"
           
-          # STUFE 2: Datei per API an die Queue des Zielknotens binden
+          # STUFE 2: Datei per API an die Queue des Zielknotens binden (Parameter im JSON-Body)
           echo "Füge Datei [$FILE_ID] der Import-Queue von Knoten [$NODE_NAME] hinzu..."
           ATTACH_RESPONSE=$(mktemp)
-          ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload?nodeName=${NODE_NAME}&fileId=${FILE_ID}" \
+          
+          ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload" \
             -H "Authorization: Bearer $TMS_TOKEN" \
-            -H "Accept: application/json")
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "{\"nodeName\": \"${NODE_NAME}\", \"fileId\": ${FILE_ID}}")
           
           ATTACH_BODY=$(cat "$ATTACH_RESPONSE")
           rm "$ATTACH_RESPONSE"
