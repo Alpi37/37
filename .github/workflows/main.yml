@@ -1,84 +1,193 @@
-name: Sync iFlows to Git
+name: Sync, Build and Deploy iFlows
 
 on:
-    workflow_dispatch:
-      inputs:
-        package_id:
-          description: 'Package ID from Integration Suite'
-          required: true
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-    sync:
-      runs-on: ubuntu-latest
-      permissions:
-        contents: write
+  sync-build-deploy:
+    runs-on: ubuntu-24.04
 
-      steps:
-         - name: Checkout this repo
-           uses: actions/checkout@v4
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-         - name: Get Bearer Token
-           id: get-token
-           env:
-            BTP_CLIENT_ID: ${{ secrets.IAS_CLIENTID }}
-            BTP_CLIENT_SECRET: ${{ secrets.IAS_CLIENTSECRET }}
-           run: |
-            RESPONSE=$(curl -s -X POST "${{ vars.BTP_TOKEN_URL }}" \
-              -H "Content-Type: application/x-www-form-urlencoded" \
-              --data-urlencode "grant_type=client_credentials" \
-              --data-urlencode "client_id=$BTP_CLIENT_ID" \
-              --data-urlencode "client_secret=$BTP_CLIENT_SECRET")
-            TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
-            if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
-              echo "Auth failed. Response: $RESPONSE"
-              exit 1
-            fi
-            echo "token=$TOKEN" >> $GITHUB_OUTPUT
-         - name: Download iFlows from Integration Suite
-           run: |
-            PACKAGE_ID="${{ github.event.inputs.package_id }}"
-            mkdir -p "iflows/$PACKAGE_ID"
-            RESPONSE=$(curl -s \
-              "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
-              -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
-              -H "Accept: application/json")
-            if [[ ! "$RESPONSE" == \{* ]]; then
-              echo "Error: SAP did not return JSON. Response was:"
-              echo "$RESPONSE"
-              exit 1
-            fi
-            IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id')
-            if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
-              echo "No iFlows found in package $PACKAGE_ID"
-              exit 1
-            fi
-            for IFLOW_ID in $IFLOWS; do
-              echo "Downloading: $IFLOW_ID"
-              curl -s \
-                "${{ vars.CPI_HOST }}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
-                -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
-                -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
-              unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
-              rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
-            done
-         - name: Commit and Push
-           run: |
-            git config user.email "github-actions@github.com"
-            git config user.name "github-actions"
-            git add iflows/
-            if git diff --staged --quiet; then
-              echo "No changes detected."
-            else
-              git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }}"
-              git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}
-              git push
-            fi
-         - name: Build MTA
-           run: |
-            npm install -g mbt
-            mbt build -t gen
-         - name: Upload MTAR as Artifact
-           uses: actions/upload-artifact@v4
-           with:
-             name: transport-package
-             path: gen/*.mtar
+      - name: GitHub Secrets Validierung
+        run: |
+          echo "=== PRÜFUNG DER GITHUB SECRETS ==="
+          if [ -z "$BTP_CLIENT_ID" ]; then
+            echo "ERROR: 'BTP_CLIENT_ID' ist leer! GitHub stellt das Secret nicht bereit."
+            echo "Bitte prüfe unter Settings -> Secrets -> Actions, ob das Secret existiert."
+            exit 1
+          else
+            echo "OK: 'BTP_CLIENT_ID' wurde von GitHub erfolgreich geladen."
+          fi
+          if [ -z "$BTP_CLIENT_SECRET" ]; then
+            echo "ERROR: 'BTP_CLIENT_SECRET' ist leer!"
+            exit 1
+          fi
+          echo "=================================="
+        env:
+          BTP_CLIENT_ID: ${{ secrets.BTP_CLIENT_ID }}
+          BTP_CLIENT_SECRET: ${{ secrets.BTP_CLIENT_SECRET }}
+
+      - name: Auth an Source CPI
+        id: cpi_auth
+        run: |
+          echo "Fordere Token von der Source-Instanz an..."
+          RESPONSE=$(curl -s -X POST "$TOKEN_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$BTP_CLIENT_ID" \
+            --data-urlencode "client_secret=$BTP_CLIENT_SECRET")
+          
+          TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
+          if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
+            echo "CRITICAL: Auth an Source CPI fehlgeschlagen. Response: $RESPONSE"
+            exit 1
+          fi
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+        env:
+          BTP_CLIENT_ID: ${{ secrets.BTP_CLIENT_ID }}
+          BTP_CLIENT_SECRET: ${{ secrets.BTP_CLIENT_SECRET }}
+          TOKEN_URL: https://bti-payg.authentication.eu10.hana.ondemand.com/oauth/token
+
+      - name: Download iFlows aus SAP Integration Suite
+        run: |
+          PACKAGE_ID="AY"
+          mkdir -p "iflows/$PACKAGE_ID"
+          
+          echo "Frage verknüpfte iFlows für Paket [$PACKAGE_ID] ab..."
+          RESPONSE=$(curl -s \
+            "${CPI_HOST}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
+            -H "Authorization: Bearer ${{ steps.cpi_auth.outputs.token }}" \
+            -H "Accept: application/json")
+          
+          if [[ ! "$RESPONSE" == \{* ]]; then
+            echo "CRITICAL: SAP hat kein valides JSON zurückgegeben. Antwort:"
+            echo "$RESPONSE"
+            exit 1
+          fi
+          
+          IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id' 2>/dev/null)
+          if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
+            echo "CRITICAL: Keine iFlows im Paket $PACKAGE_ID gefunden oder API-Struktur weicht ab."
+            exit 1
+          fi
+          
+          for IFLOW_ID in $IFLOWS; do
+            echo "Lade iFlow herunter: $IFLOW_ID"
+            curl -s \
+              "${CPI_HOST}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
+              -H "Authorization: Bearer ${{ steps.cpi_auth.outputs.token }}" \
+              -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+            
+            unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
+            rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+          done
+        env:
+          CPI_HOST: https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com
+
+      - name: Commit & Push Änderungen (falls vorhanden)
+        run: |
+          git config user.email "github-actions@github.com"
+          git config user.name "github-actions"
+          git add iflows/
+          
+          if git diff --staged --quiet; then
+            echo "Keine Änderungen im iFlow-Code festgestellt. Überspringe Push."
+          else
+            git commit -m "Sync iFlows from package AY [skip ci]"
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+            git pull origin main --rebase
+            git push origin main
+          fi
+
+      - name: Build MTA Archive (MBT)
+        run: |
+          npm install -g mbt
+          mbt build -t gen
+
+      - name: Upload Artifact (Backup in GitHub)
+        uses: actions/upload-artifact@v4
+        with:
+          name: transport-package
+          path: gen/*.mtar
+
+      - name: Upload & Queue an SAP cTMS
+        run: |
+          echo "Handshake mit Target cTMS-Instanz..."
+          TOKEN_RAW=$(curl -s -X POST "$TMS_TOKEN_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$TMS_CLIENT_ID" \
+            --data-urlencode "client_secret=$TMS_CLIENT_SECRET")
+          
+          TMS_TOKEN=$(echo "$TOKEN_RAW" | jq -r '.access_token')
+          if [ "$TMS_TOKEN" == "null" ] || [ -z "$TMS_TOKEN" ]; then
+            echo "CRITICAL: Authentifizierung am Target cTMS failed: $TOKEN_RAW"
+            exit 1
+          fi
+          
+          MTAR_FILE=$(ls gen/*.mtar | head -n 1)
+          
+          echo "Lade Paket [$MTAR_FILE] in den cTMS-Speicher hoch..."
+          RESPONSE_FILE=$(mktemp)
+          HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/files/upload" \
+            -H "Authorization: Bearer $TMS_TOKEN" \
+            -H "Accept: application/json" \
+            -F "file=@$MTAR_FILE")
+          
+          BODY=$(cat "$RESPONSE_FILE")
+          rm "$RESPONSE_FILE"
+          
+          if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
+            echo "CRITICAL: cTMS File-Upload abgelehnt. Code: $HTTP_CODE, Response: $BODY"
+            exit 1
+          fi
+          
+          echo "DEBUG: cTMS Upload Response: $BODY"
+          FILE_ID=$(echo "$BODY" | jq -r '.fileId // .id // .Id // empty' 2>/dev/null)
+          
+          if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
+            echo "CRITICAL: Keine File-ID in der cTMS-Response erhalten. Response: $BODY"
+            exit 1
+          fi
+          
+          echo "SUCCESS: Datei im Speicher abgelegt. cTMS File-ID ist: $FILE_ID"
+          
+          echo "Füge Datei [$FILE_ID] der Import-Queue von Knoten [$NODE_NAME] hinzu..."
+          ATTACH_RESPONSE=$(mktemp)
+          
+          ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload-file" \
+            -H "Authorization: Bearer $TMS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "{\"entries\": [{\"nodeName\": \"${NODE_NAME}\", \"fileId\": ${FILE_ID}}]}")
+          
+          ATTACH_BODY=$(cat "$ATTACH_RESPONSE")
+          rm "$ATTACH_RESPONSE"
+          
+          echo "cTMS Gateway Antwort-Code für Queue-Zuweisung: $ATTACH_HTTP_CODE"
+          
+          if [ "$ATTACH_HTTP_CODE" -ne 201 ] && [ "$ATTACH_HTTP_CODE" -ne 200 ]; then
+            echo "CRITICAL: Zuordnung zur Queue fehlgeschlagen! Details: $ATTACH_BODY"
+            exit 1
+          fi
+          
+          echo "=========================================================================="
+          echo "Der Transport wurde erfolgreich in die Queue von $NODE_NAME eingereiht!"
+          echo "=========================================================================="
+        env:
+          TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
+          TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
+          TMS_TOKEN_URL: https://achybriddev.authentication.eu10.hana.ondemand.com/oauth/token
+          TMS_API_URL: https://transport-service-app-backend.ts.cfapps.eu10.hana.ondemand.com
+          NODE_NAME: ACX_TARGET
