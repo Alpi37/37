@@ -112,81 +112,78 @@ jobs:
           name: transport-package
           path: gen/*.mtar
 
-      # --- 7. DIREKTER ZWEISTUFIGER CTMS UPLOAD & QUEUE INJEKTION ---
-      - name: Upload Built MTAR and Attach to cTMS Target Node
+      # --- 7. DIREKTER ZWEISTUFIGER CTMS UPLOAD & TRANSPORT ERZEUGEN ---
+      - name: Upload Built MTAR and Create Transport in cTMS
         env:
           TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
           TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
           TMS_TOKEN_URL: ${{ vars.TMS_TOKEN_URL }}
           TMS_API_URL: ${{ vars.TMS_URL }}
-          NODE_NAME: "ACX_TARGET"
+          NODE_NAME: "ACX_SOURCE"   # Export-Node, nicht Target!
         run: |
-          echo "Handshake mit Target cTMS-Instanz..."
+          echo "Handshake mit cTMS-Instanz..."
           TOKEN_RAW=$(curl -s -X POST "$TMS_TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=client_credentials" \
             --data-urlencode "client_id=$TMS_CLIENT_ID" \
             --data-urlencode "client_secret=$TMS_CLIENT_SECRET")
-          
+
           TMS_TOKEN=$(echo "$TOKEN_RAW" | jq -r '.access_token')
           if [ "$TMS_TOKEN" == "null" ] || [ -z "$TMS_TOKEN" ]; then
-            echo "CRITICAL: Authentifizierung am Target cTMS failed: $TOKEN_RAW"
+            echo "CRITICAL: Authentifizierung fehlgeschlagen: $TOKEN_RAW"
             exit 1
           fi
-          
+
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
-          MTAR_NAME=$(basename "$MTAR_FILE")
-          
-          # STUFE 1: In den Dateispeicher hochladen
-          echo "Lade Paket [$MTAR_FILE] in den cTMS-Speicher hoch..."
+
+          # STUFE 1: Datei hochladen
+          echo "Lade [$MTAR_FILE] in cTMS-Dateispeicher hoch..."
           RESPONSE_FILE=$(mktemp)
-          HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/files/upload" \
+          HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+            -X POST "${TMS_API_URL}/v2/files/upload" \
             -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Accept: application/json" \
             -F "file=@$MTAR_FILE")
-          
-          BODY=$(cat "$RESPONSE_FILE")
-          rm "$RESPONSE_FILE"
-          
+
+          BODY=$(cat "$RESPONSE_FILE"); rm "$RESPONSE_FILE"
+
           if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
-            echo "CRITICAL: cTMS File-Upload abgelehnt. Code: $HTTP_CODE, Response: $BODY"
+            echo "CRITICAL: File-Upload abgelehnt. Code: $HTTP_CODE, Body: $BODY"
             exit 1
           fi
-          
-          echo "DEBUG: cTMS Upload Response: $BODY"
-          FILE_ID=$(echo "$BODY" | jq -r '.fileId // .id // .Id // empty' 2>/dev/null)
-          
+
+          FILE_ID=$(echo "$BODY" | jq -r '.fileId // .id // .Id // empty')
           if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
-            echo "CRITICAL: Keine File-ID in der cTMS-Response erhalten. Response: $BODY"
+            echo "CRITICAL: Keine File-ID erhalten. Body: $BODY"
             exit 1
           fi
-          
-          echo "SUCCESS: Datei im Speicher abgelegt. cTMS File-ID ist: $FILE_ID"
-          
-          # STUFE 2: Datei per API an die Queue des Zielknotens binden mit vollständigem Payload
-          echo "Füge Datei [$FILE_ID] der Import-Queue von Knoten [$NODE_NAME] hinzu..."
+          echo "SUCCESS: File-ID ist $FILE_ID"
+
+          # STUFE 2: Transport erzeugen
+          # nodeName/contentType/storageType sind TOP-LEVEL, NICHT in entries!
+          # uri in entries ist die fileId (Zahl), NICHT der Dateiname!
+          echo "Erzeuge Transport-Request auf Node [$NODE_NAME]..."
+          PAYLOAD=$(printf \
+            '{"nodeName":"%s","contentType":"MTA","storageType":"FILE","entries":[{"uri":"%s"}],"description":"GitHub Actions Deployment"}' \
+            "$NODE_NAME" "$FILE_ID")
+
           ATTACH_RESPONSE=$(mktemp)
-          
-          # Echte, saubere JSON-Zeile ohne versteckte Whitespace-Bytes
-          PAYLOAD="{\"entries\":[{\"nodeName\":\"${NODE_NAME}\",\"fileId\":${FILE_ID},\"storageType\":\"FILE\",\"contentType\":\"MTA\",\"uri\":\"${MTAR_NAME}\"}]}"
-          
-          ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" -X POST "${TMS_API_URL}/v1/nodes/upload" \
+          ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" \
+            -X POST "${TMS_API_URL}/v2/nodes/export" \
             -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
             -d "$PAYLOAD")
-          
-          ATTACH_BODY=$(cat "$ATTACH_RESPONSE")
-          rm "$ATTACH_RESPONSE"
-          
-          echo "cTMS Gateway Antwort-Code für Queue-Zuweisung: $ATTACH_HTTP_CODE"
-          
+
+          ATTACH_BODY=$(cat "$ATTACH_RESPONSE"); rm "$ATTACH_RESPONSE"
+
+          echo "cTMS Antwort-Code: $ATTACH_HTTP_CODE"
           if [ "$ATTACH_HTTP_CODE" -ne 201 ] && [ "$ATTACH_HTTP_CODE" -ne 200 ]; then
-            echo "CRITICAL: Zuordnung zur Queue fehlgeschlagen! Details: $ATTACH_BODY"
+            echo "CRITICAL: Transport-Request fehlgeschlagen! Body: $ATTACH_BODY"
             exit 1
           fi
-          
-          echo "=========================================================================="
-          echo "BOOM! Der Transport wurde erfolgreich in die Queue von $NODE_NAME eingereiht!"
-          echo "Du kannst das Paket jetzt im BTP Cockpit sehen und importieren."
-          echo "=========================================================================="
+
+          echo "================================================================"
+          echo "Transport erfolgreich erzeugt und in ACX_TARGET eingereiht."
+          echo "Details: $ATTACH_BODY"
+          echo "================================================================"
