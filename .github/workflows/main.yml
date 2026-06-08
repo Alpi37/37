@@ -69,6 +69,7 @@ jobs:
           IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id' 2>/dev/null)
           if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
             echo "CRITICAL: Keine iFlows im Paket $PACKAGE_ID gefunden oder API-Struktur weicht ab."
+            echo "$RESPONSE"
             exit 1
           fi
           
