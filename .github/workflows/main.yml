@@ -45,7 +45,6 @@ jobs:
             exit 1
           fi
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
-
       # --- 3. IFLOWS AUTOMATISCH HERUNTERLADEN & ENTPACKEN ---
       - name: Download iFlows from Integration Suite
         env:
@@ -83,7 +82,6 @@ jobs:
             unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
             rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
           done
-
       # --- 4. GIT COMMIT UND PUSH (MIT REBASE-SCHUTZ) ---
       - name: Commit and Push changes to GitHub
         run: |
@@ -99,38 +97,38 @@ jobs:
             git pull origin main --rebase
             git push origin main
           fi
-
       # 5. Build mtar
       - name: Build MTA Archive
         run: |
           PACKAGE_ID="${{ github.event.inputs.package_id }}"
-
           cat > mta.yaml << EOF
           _schema-version: "3.1"
           ID: integration-suite-packages
           version: 1.0.${{ github.run_number }}
-
           modules:
             - name: package-content
               type: com.sap.integration.suite.package
               path: iflows/${PACKAGE_ID}
               requires:
                 - name: integration-suite-instance
-
           resources:
             - name: integration-suite-instance
               type: org.cloudfoundry.existing-service
               parameters:
                 service-name: integrationruntime
-                service: integrationsuite
+                service: process-integration-runtime
                 service-plan: api
           EOF
-
           npm install -g mbt
           mbt build -t gen
-
           echo "=== mtad.yaml zur Verifikation ==="
           unzip -p gen/*.mtar META-INF/mtad.yaml
+      # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN ---
+      - name: Upload MTAR as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transport-package
+          path: gen/*.mtar
 
       # --- 7. DIREKTER ZWEISTUFIGER CTMS UPLOAD & TRANSPORT ERZEUGEN ---
       - name: Upload Built MTAR and Create Transport in cTMS
@@ -147,15 +145,12 @@ jobs:
             --data-urlencode "grant_type=client_credentials" \
             --data-urlencode "client_id=$TMS_CLIENT_ID" \
             --data-urlencode "client_secret=$TMS_CLIENT_SECRET")
-
           TMS_TOKEN=$(echo "$TOKEN_RAW" | jq -r '.access_token')
           if [ "$TMS_TOKEN" == "null" ] || [ -z "$TMS_TOKEN" ]; then
             echo "CRITICAL: Authentifizierung fehlgeschlagen: $TOKEN_RAW"
             exit 1
           fi
-
           MTAR_FILE=$(ls gen/*.mtar | head -n 1)
-
           # STUFE 1: Datei hochladen
           echo "Lade [$MTAR_FILE] in cTMS-Dateispeicher hoch..."
           RESPONSE_FILE=$(mktemp)
@@ -164,21 +159,17 @@ jobs:
             -H "Authorization: Bearer $TMS_TOKEN" \
             -H "Accept: application/json" \
             -F "file=@$MTAR_FILE")
-
           BODY=$(cat "$RESPONSE_FILE"); rm "$RESPONSE_FILE"
-
           if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
             echo "CRITICAL: File-Upload abgelehnt. Code: $HTTP_CODE, Body: $BODY"
             exit 1
           fi
-
           FILE_ID=$(echo "$BODY" | jq -r '.fileId // .id // .Id // empty')
           if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
             echo "CRITICAL: Keine File-ID erhalten. Body: $BODY"
             exit 1
           fi
           echo "SUCCESS: File-ID ist $FILE_ID"
-
           # STUFE 2: Transport erzeugen
           # nodeName/contentType/storageType sind TOP-LEVEL, NICHT in entries!
           # uri in entries ist die fileId (Zahl), NICHT der Dateiname!
@@ -186,7 +177,6 @@ jobs:
           PAYLOAD=$(printf \
             '{"nodeName":"%s","contentType":"MTA","storageType":"FILE","entries":[{"uri":"%s"}],"description":"GitHub Actions Deployment"}' \
             "$NODE_NAME" "$FILE_ID")
-
           ATTACH_RESPONSE=$(mktemp)
           ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" \
             -X POST "${TMS_API_URL}/v2/nodes/export" \
@@ -194,15 +184,12 @@ jobs:
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
             -d "$PAYLOAD")
-
           ATTACH_BODY=$(cat "$ATTACH_RESPONSE"); rm "$ATTACH_RESPONSE"
-
           echo "cTMS Antwort-Code: $ATTACH_HTTP_CODE"
           if [ "$ATTACH_HTTP_CODE" -ne 201 ] && [ "$ATTACH_HTTP_CODE" -ne 200 ]; then
             echo "CRITICAL: Transport-Request fehlgeschlagen! Body: $ATTACH_BODY"
             exit 1
           fi
-
           echo "================================================================"
           echo "Transport erfolgreich erzeugt und in ACX_TARGET eingereiht."
           echo "Details: $ATTACH_BODY"
