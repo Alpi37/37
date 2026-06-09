@@ -114,10 +114,21 @@ jobs:
             - name: package-content
               type: com.sap.integration.suite.package
               path: iflows/${PACKAGE_ID}
+              requires:
+                - name: integration-suite-instance
+
+          resources:
+            - name: integration-suite-instance
+              type: org.cloudfoundry.existing-service
+              parameters:
+                service-name: integrationruntime
           EOF
 
           npm install -g mbt
           mbt build -t gen
+
+          echo "=== mtad.yaml zur Verifikation ==="
+          unzip -p gen/*.mtar META-INF/mtad.yaml
 
       # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN ---
       - name: Upload MTAR as Artifact
