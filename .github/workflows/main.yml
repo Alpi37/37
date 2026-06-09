@@ -122,7 +122,7 @@ jobs:
               type: org.cloudfoundry.existing-service
               parameters:
                 service-name: integrationruntime
-                service: process-integration-runtime
+                service: integrationsuite
                 service-plan: api
           EOF
 
