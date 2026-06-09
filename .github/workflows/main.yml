@@ -100,7 +100,7 @@ jobs:
             git push origin main
           fi
 
-      # --- 5. MTA ARCHIV (MTAR) BAUEN ---
+      # 5. Build mtar
       - name: Build MTA Archive
         run: |
           PACKAGE_ID="${{ github.event.inputs.package_id }}"
@@ -122,6 +122,8 @@ jobs:
               type: org.cloudfoundry.existing-service
               parameters:
                 service-name: integrationruntime
+                service: process-integration-runtime
+                service-plan: api
           EOF
 
           npm install -g mbt
@@ -129,13 +131,6 @@ jobs:
 
           echo "=== mtad.yaml zur Verifikation ==="
           unzip -p gen/*.mtar META-INF/mtad.yaml
-
-      # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN ---
-      - name: Upload MTAR as Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: transport-package
-          path: gen/*.mtar
 
       # --- 7. DIREKTER ZWEISTUFIGER CTMS UPLOAD & TRANSPORT ERZEUGEN ---
       - name: Upload Built MTAR and Create Transport in cTMS
