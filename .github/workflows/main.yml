@@ -103,6 +103,19 @@ jobs:
       # --- 5. MTA ARCHIV (MTAR) BAUEN ---
       - name: Build MTA Archive
         run: |
+          PACKAGE_ID="${{ github.event.inputs.package_id }}"
+
+          cat > mta.yaml << EOF
+          _schema-version: "3.1"
+          ID: integration-suite-packages
+          version: 1.0.${{ github.run_number }}
+
+          modules:
+            - name: package-content
+              type: com.sap.integration.suite.package
+              path: iflows/${PACKAGE_ID}
+          EOF
+
           npm install -g mbt
           mbt build -t gen
 
