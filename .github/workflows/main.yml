@@ -97,32 +97,73 @@ jobs:
             git pull origin main --rebase
             git push origin main
           fi
-      # 5. Build mtar
+      # 5. Build mtar (direkt ohne mbt — CAS-Metadaten-MTAR, kein lokaler Content)
       - name: Build MTA Archive
+        env:
+          CPI_RESOURCE_IDS: ${{ vars.CPI_RESOURCE_IDS }}
         run: |
           PACKAGE_ID="${{ github.event.inputs.package_id }}"
-          cat > mta.yaml << EOF
-          _schema-version: "3.1"
-          ID: integration-suite-packages
-          version: 1.0.${{ github.run_number }}
+          RUN_NUMBER="${{ github.run_number }}"
+          RESOURCE_ID=$(echo "$CPI_RESOURCE_IDS" | jq -r --arg pkg "$PACKAGE_ID" '.[$pkg] // empty')
+          if [ -z "$RESOURCE_ID" ]; then
+            echo "CRITICAL: Keine resource-id für Paket [$PACKAGE_ID] in CPI_RESOURCE_IDS hinterlegt."
+            exit 1
+          fi
+          echo "resource-id für [$PACKAGE_ID]: $RESOURCE_ID"
+          mkdir -p gen META-INF
+          cat > META-INF/mtad.yaml << EOF
+          ID: ${PACKAGE_ID}-transport
+          description: Transport of CPI package ${PACKAGE_ID} via GitHub Actions
+          version: 1.0.${RUN_NUMBER}
+          _schema-version: '3.2'
+          parameters-metadata: {}
           modules:
-            - name: package-content
-              type: com.sap.integration.suite.package
-              path: iflows/${PACKAGE_ID}
-              requires:
-                - name: integration-suite-instance
-          resources:
-            - name: integration-suite-instance
-              type: org.cloudfoundry.existing-service
+          - name: ${PACKAGE_ID}
+            parameters-metadata: {}
+            properties-metadata: {}
+            requires:
+            - name: process_integration_transport_instance
               parameters:
-                service-name: integrationruntime
-                service: process-integration-runtime
-                service-plan: api
+                delete-service-key-after-deployment: true
+                config:
+                  module:
+                    name: ${PACKAGE_ID}
+                    type: com.sap.integration
+                    parameters:
+                      resource-type: ContentPackage
+                      technical-name: ${PACKAGE_ID}
+                      resource-id: ${RESOURCE_ID}
+                content-target: true
+              parameters-metadata: {}
+              properties-metadata: {}
+            type: com.sap.integration
+          resources:
+          - active: true
+            optional: false
+            name: process_integration_transport_instance
+            parameters:
+              service-plan: api
+              skip-service-updates:
+                parameters: true
+              service: it-rt
+              config:
+                roles:
+                - WorkspacePackagesTransport
+            parameters-metadata: {}
+            properties-metadata: {}
+            type: org.cloudfoundry.managed-service
           EOF
-          npm install -g mbt
-          mbt build -t gen
+          cat > META-INF/MANIFEST.MF << EOF
+          Manifest-Version: 1.0
+          Created-By: GitHub Actions
+          MTA-ID: ${PACKAGE_ID}-transport
+          MTA-VERSION: 1.0.${RUN_NUMBER}
+          EOF
+          zip -r "gen/${PACKAGE_ID}-1.0.${RUN_NUMBER}.mtar" META-INF/
           echo "=== mtad.yaml zur Verifikation ==="
-          unzip -p gen/*.mtar META-INF/mtad.yaml
+          unzip -p "gen/${PACKAGE_ID}-1.0.${RUN_NUMBER}.mtar" META-INF/mtad.yaml
+          echo "=== MTAR erstellt ==="
+          ls -la gen/*.mtar
       # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN ---
       - name: Upload MTAR as Artifact
         uses: actions/upload-artifact@v4
