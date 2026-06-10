@@ -45,6 +45,7 @@ jobs:
             exit 1
           fi
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
       # --- 3. IFLOWS AUTOMATISCH HERUNTERLADEN & ENTPACKEN ---
       - name: Download iFlows from Integration Suite
         env:
@@ -82,6 +83,7 @@ jobs:
             unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
             rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
           done
+
       # --- 4. GIT COMMIT UND PUSH (MIT REBASE-SCHUTZ) ---
       - name: Commit and Push changes to GitHub
         run: |
@@ -97,141 +99,182 @@ jobs:
             git pull origin main --rebase
             git push origin main
           fi
-      # 5. Build mtar (direkt ohne mbt — CAS-Metadaten-MTAR, kein lokaler Content)
-      - name: Build MTA Archive
+
+      # --- 5. EXPORT VIA CAS → cTMS ---
+      # CAS übernimmt vollständig: MTAR bauen, in cTMS hochladen, Transport-Request anlegen.
+      # exportMode=TransportManagementService → Step 7 (manueller cTMS-Upload) entfällt.
+      # resourceID wird dynamisch via /v1/contentResources ermittelt → CPI_RESOURCE_IDS entfällt.
+      - name: Export Package via CAS and push to cTMS
         env:
-          CPI_RESOURCE_IDS: ${{ vars.CPI_RESOURCE_IDS }}
+          CAS_CLIENT_ID: ${{ secrets.CAS_CLIENT_ID }}
+          CAS_CLIENT_SECRET: ${{ secrets.CAS_CLIENT_SECRET }}
+          CAS_TOKEN_URL: ${{ vars.CAS_TOKEN_URL }}
+          CAS_API_URL: ${{ vars.CAS_API_URL }}
         run: |
           PACKAGE_ID="${{ github.event.inputs.package_id }}"
           RUN_NUMBER="${{ github.run_number }}"
-          RESOURCE_ID=$(echo "$CPI_RESOURCE_IDS" | jq -r --arg pkg "$PACKAGE_ID" '.[$pkg] // empty')
-          if [ -z "$RESOURCE_ID" ]; then
-            echo "CRITICAL: Keine resource-id für Paket [$PACKAGE_ID] in CPI_RESOURCE_IDS hinterlegt."
+          mkdir -p gen
+
+          # --- AUTH ---
+          echo "Fordere CAS-Token an..."
+          CAS_TOKEN_RAW=$(curl -s -X POST "$CAS_TOKEN_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$CAS_CLIENT_ID" \
+            --data-urlencode "client_secret=$CAS_CLIENT_SECRET")
+          CAS_TOKEN=$(echo "$CAS_TOKEN_RAW" | jq -r '.access_token')
+          if [ "$CAS_TOKEN" == "null" ] || [ -z "$CAS_TOKEN" ]; then
+            echo "CRITICAL: CAS Auth fehlgeschlagen: $CAS_TOKEN_RAW"
             exit 1
           fi
-          echo "resource-id für [$PACKAGE_ID]: $RESOURCE_ID"
-          mkdir -p gen META-INF
-          cat > META-INF/mtad.yaml << EOF
-          ID: ${PACKAGE_ID}-transport
-          description: Transport of CPI package ${PACKAGE_ID} via GitHub Actions
-          version: 1.0.${RUN_NUMBER}
-          _schema-version: '3.2'
-          parameters-metadata: {}
-          modules:
-          - name: ${PACKAGE_ID}
-            parameters-metadata: {}
-            properties-metadata: {}
-            requires:
-            - name: process_integration_transport_instance
-              parameters:
-                delete-service-key-after-deployment: true
-                config:
-                  module:
-                    name: ${PACKAGE_ID}
-                    type: com.sap.integration
-                    parameters:
-                      resource-type: ContentPackage
-                      technical-name: ${PACKAGE_ID}
-                      resource-id: ${RESOURCE_ID}
-                content-target: true
-              parameters-metadata: {}
-              properties-metadata: {}
-            type: com.sap.integration
-          resources:
-          - active: true
-            optional: false
-            name: process_integration_transport_instance
-            parameters:
-              service-plan: api
-              skip-service-updates:
-                parameters: true
-              service: it-rt
-              config:
-                roles:
-                - WorkspacePackagesTransport
-            parameters-metadata: {}
-            properties-metadata: {}
-            type: org.cloudfoundry.managed-service
-          EOF
-          cat > META-INF/MANIFEST.MF << EOF
-          Manifest-Version: 1.0
-          Created-By: GitHub Actions
-          MTA-ID: ${PACKAGE_ID}-transport
-          MTA-VERSION: 1.0.${RUN_NUMBER}
-          EOF
-          zip -r "gen/${PACKAGE_ID}-1.0.${RUN_NUMBER}.mtar" META-INF/
-          echo "=== mtad.yaml zur Verifikation ==="
-          unzip -p "gen/${PACKAGE_ID}-1.0.${RUN_NUMBER}.mtar" META-INF/mtad.yaml
-          echo "=== MTAR erstellt ==="
-          ls -la gen/*.mtar
+          echo "CAS Token erhalten."
+
+          # --- TMS-VERBINDUNG PRÜFEN (Diagnose) ---
+          echo "Prüfe CAS → TMS Verbindung und verfügbare Source-Nodes..."
+          TMS_MODE_RESPONSE=$(curl -s \
+            "${CAS_API_URL}/v1/transportModes" \
+            -H "Authorization: Bearer $CAS_TOKEN" \
+            -H "Accept: application/json")
+          echo "Transport Modes: $TMS_MODE_RESPONSE"
+          # sourceNode=ACX_SOURCE muss in der Liste der sourceNodes auftauchen.
+          # Falls nicht → CAS-TMS-Destination prüfen (BTP Cockpit → Destinations).
+
+          # --- RESOURCE-ID DYNAMISCH ERMITTELN ---
+          # CAS kennt alle Pakete des Tenants. Wir filtern nach PACKAGE_ID.
+          echo "Ermittle resourceID für Paket [$PACKAGE_ID]..."
+          RESOURCES_RESPONSE=$(curl -s \
+            "${CAS_API_URL}/v1/contentResources" \
+            -H "Authorization: Bearer $CAS_TOKEN" \
+            -H "Accept: application/json")
+          echo "CAS contentResources Response: $RESOURCES_RESPONSE"
+
+          RESOURCE_ID=$(echo "$RESOURCES_RESPONSE" | \
+            jq -r --arg pkg "$PACKAGE_ID" \
+            '.contentResources[] | select(.id == $pkg) | .resourceID')
+          RESOURCE_TYPE=$(echo "$RESOURCES_RESPONSE" | \
+            jq -r --arg pkg "$PACKAGE_ID" \
+            '.contentResources[] | select(.id == $pkg) | .type')
+          RESOURCE_SUBTYPE=$(echo "$RESOURCES_RESPONSE" | \
+            jq -r --arg pkg "$PACKAGE_ID" \
+            '.contentResources[] | select(.id == $pkg) | .subType')
+
+          if [ -z "$RESOURCE_ID" ] || [ "$RESOURCE_ID" == "null" ]; then
+            echo "CRITICAL: Paket [$PACKAGE_ID] nicht in CAS contentResources gefunden."
+            echo "Verfügbare Pakete:"
+            echo "$RESOURCES_RESPONSE" | jq -r '.contentResources[] | "\(.id) | \(.type)/\(.subType) | \(.resourceID)"'
+            exit 1
+          fi
+          echo "resourceID: $RESOURCE_ID | type: $RESOURCE_TYPE | subType: $RESOURCE_SUBTYPE"
+
+          # --- EXPORT-JOB STARTEN ---
+          # exportMode=TransportManagementService: CAS pusht MTAR direkt in cTMS auf ACX_SOURCE.
+          EXPORT_PAYLOAD=$(jq -n \
+            --arg pkg "$PACKAGE_ID" \
+            --arg resourceId "$RESOURCE_ID" \
+            --arg type "$RESOURCE_TYPE" \
+            --arg subType "$RESOURCE_SUBTYPE" \
+            --arg runNum "$RUN_NUMBER" \
+            '{
+              "exportMode": "TransportManagementService",
+              "exportMediaType": "MTAR",
+              "sourceNode": "ACX_SOURCE",
+              "version": ("1.0." + $runNum),
+              "description": ("GitHub Actions Deployment - Run " + $runNum),
+              "requestor": "GitHub Actions",
+              "contentResources": [{
+                "resourceID": $resourceId,
+                "type": $type,
+                "subType": $subType,
+                "id": $pkg,
+                "version": ("1.0." + $runNum)
+              }]
+            }')
+
+          echo "Starte CAS Export-Job für Paket [$PACKAGE_ID]..."
+          EXPORT_RESPONSE=$(curl -s -X POST "${CAS_API_URL}/v1/contentResources/export" \
+            -H "Authorization: Bearer $CAS_TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Accept: application/json" \
+            -d "$EXPORT_PAYLOAD")
+          echo "CAS Export Response: $EXPORT_RESPONSE"
+
+          ACTIVITY_ID=$(echo "$EXPORT_RESPONSE" | jq -r '.activityId // empty')
+          if [ -z "$ACTIVITY_ID" ] || [ "$ACTIVITY_ID" == "null" ]; then
+            echo "CRITICAL: Keine activityId von CAS erhalten."
+            exit 1
+          fi
+          echo "CAS Export-Job gestartet. activityId: $ACTIVITY_ID"
+
+          # --- POLLEN BIS FINISHED ---
+          # Endzustände laut API-Doku: FINISHED, WARNING, ERROR, ABORTED
+          # Maximal 30 × 20s = 10 Minuten Timeout
+          MAX_ATTEMPTS=30
+          SLEEP_SECONDS=20
+          STATE="UNKNOWN"
+          for i in $(seq 1 $MAX_ATTEMPTS); do
+            echo "Poll $i/$MAX_ATTEMPTS — warte ${SLEEP_SECONDS}s..."
+            sleep $SLEEP_SECONDS
+            POLL_RESPONSE=$(curl -s \
+              "${CAS_API_URL}/v1/operations/${ACTIVITY_ID}" \
+              -H "Authorization: Bearer $CAS_TOKEN" \
+              -H "Accept: application/json")
+            STATE=$(echo "$POLL_RESPONSE" | jq -r '.state // empty')
+            PROGRESS=$(echo "$POLL_RESPONSE" | jq -r '.progress // "?"')
+            echo "State: $STATE | Progress: ${PROGRESS}%"
+            if [ "$STATE" == "FINISHED" ] || [ "$STATE" == "WARNING" ]; then
+              echo "Export abgeschlossen mit Status: $STATE"
+              break
+            elif [ "$STATE" == "ERROR" ] || [ "$STATE" == "ABORTED" ]; then
+              echo "CRITICAL: CAS Export fehlgeschlagen. Vollständige Antwort:"
+              echo "$POLL_RESPONSE"
+              exit 1
+            fi
+          done
+          if [ "$STATE" != "FINISHED" ] && [ "$STATE" != "WARNING" ]; then
+            echo "CRITICAL: Timeout nach $((MAX_ATTEMPTS * SLEEP_SECONDS))s. Letzter State: $STATE"
+            exit 1
+          fi
+
+          # --- OPERATION CONFIG: fileID + cTMS Transport-Request-Info ---
+          CONFIG_RESPONSE=$(curl -s \
+            "${CAS_API_URL}/v1/operations/${ACTIVITY_ID}/config" \
+            -H "Authorization: Bearer $CAS_TOKEN" \
+            -H "Accept: application/json")
+          echo "Operation Config: $CONFIG_RESPONSE"
+
+          FILE_ID=$(echo "$CONFIG_RESPONSE" | jq -r '.fileID // empty')
+          TR_ID=$(echo "$CONFIG_RESPONSE" | jq -r '.transportRequestID // "N/A"')
+          TR_URL=$(echo "$CONFIG_RESPONSE" | jq -r '.transportRequestURL // "N/A"')
+
+          echo "================================================================"
+          echo "CAS Export + cTMS Transport erfolgreich abgeschlossen."
+          echo "cTMS Transport-Request ID : $TR_ID"
+          echo "cTMS Transport-Request URL: $TR_URL"
+          echo "================================================================"
+
+          # --- MTAR HERUNTERLADEN (für Artifact-Archivierung in Step 6) ---
+          if [ -n "$FILE_ID" ] && [ "$FILE_ID" != "null" ]; then
+            MTAR_FILE="gen/${PACKAGE_ID}-1.0.${RUN_NUMBER}.mtar"
+            echo "Lade MTAR herunter (fileID: $FILE_ID)..."
+            HTTP_CODE=$(curl -s -o "$MTAR_FILE" -w "%{http_code}" \
+              "${CAS_API_URL}/v1/operations/${ACTIVITY_ID}/file/${FILE_ID}" \
+              -H "Authorization: Bearer $CAS_TOKEN" \
+              -H "Accept: application/octet-stream")
+            if [ "$HTTP_CODE" -ne 200 ]; then
+              echo "WARNING: MTAR-Download fehlgeschlagen (HTTP $HTTP_CODE) — Artifact wird übersprungen."
+              rm -f "$MTAR_FILE"
+            else
+              echo "=== Inhalt des heruntergeladenen MTAR ==="
+              unzip -l "$MTAR_FILE"
+              ls -la gen/*.mtar
+            fi
+          else
+            echo "Keine fileID in Operation Config — MTAR-Download übersprungen."
+          fi
+
       # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN ---
       - name: Upload MTAR as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: transport-package
           path: gen/*.mtar
-
-      # --- 7. DIREKTER ZWEISTUFIGER CTMS UPLOAD & TRANSPORT ERZEUGEN ---
-      - name: Upload Built MTAR and Create Transport in cTMS
-        env:
-          TMS_CLIENT_ID: ${{ secrets.TMS_CLIENT_ID }}
-          TMS_CLIENT_SECRET: ${{ secrets.TMS_CLIENT_SECRET }}
-          TMS_TOKEN_URL: ${{ vars.TMS_TOKEN_URL }}
-          TMS_API_URL: ${{ vars.TMS_URL }}
-          NODE_NAME: "ACX_SOURCE"   # Export-Node, nicht Target!
-        run: |
-          echo "Handshake mit cTMS-Instanz..."
-          TOKEN_RAW=$(curl -s -X POST "$TMS_TOKEN_URL" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            --data-urlencode "grant_type=client_credentials" \
-            --data-urlencode "client_id=$TMS_CLIENT_ID" \
-            --data-urlencode "client_secret=$TMS_CLIENT_SECRET")
-          TMS_TOKEN=$(echo "$TOKEN_RAW" | jq -r '.access_token')
-          if [ "$TMS_TOKEN" == "null" ] || [ -z "$TMS_TOKEN" ]; then
-            echo "CRITICAL: Authentifizierung fehlgeschlagen: $TOKEN_RAW"
-            exit 1
-          fi
-          MTAR_FILE=$(ls gen/*.mtar | head -n 1)
-          # STUFE 1: Datei hochladen
-          echo "Lade [$MTAR_FILE] in cTMS-Dateispeicher hoch..."
-          RESPONSE_FILE=$(mktemp)
-          HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
-            -X POST "${TMS_API_URL}/v2/files/upload" \
-            -H "Authorization: Bearer $TMS_TOKEN" \
-            -H "Accept: application/json" \
-            -F "file=@$MTAR_FILE")
-          BODY=$(cat "$RESPONSE_FILE"); rm "$RESPONSE_FILE"
-          if [ "$HTTP_CODE" -ne 201 ] && [ "$HTTP_CODE" -ne 200 ]; then
-            echo "CRITICAL: File-Upload abgelehnt. Code: $HTTP_CODE, Body: $BODY"
-            exit 1
-          fi
-          FILE_ID=$(echo "$BODY" | jq -r '.fileId // .id // .Id // empty')
-          if [ -z "$FILE_ID" ] || [ "$FILE_ID" == "null" ]; then
-            echo "CRITICAL: Keine File-ID erhalten. Body: $BODY"
-            exit 1
-          fi
-          echo "SUCCESS: File-ID ist $FILE_ID"
-          # STUFE 2: Transport erzeugen
-          # nodeName/contentType/storageType sind TOP-LEVEL, NICHT in entries!
-          # uri in entries ist die fileId (Zahl), NICHT der Dateiname!
-          echo "Erzeuge Transport-Request auf Node [$NODE_NAME]..."
-          PAYLOAD=$(printf \
-            '{"nodeName":"%s","contentType":"MTA","storageType":"FILE","entries":[{"uri":"%s"}],"description":"GitHub Actions Deployment"}' \
-            "$NODE_NAME" "$FILE_ID")
-          ATTACH_RESPONSE=$(mktemp)
-          ATTACH_HTTP_CODE=$(curl -s -o "$ATTACH_RESPONSE" -w "%{http_code}" \
-            -X POST "${TMS_API_URL}/v2/nodes/export" \
-            -H "Authorization: Bearer $TMS_TOKEN" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            -d "$PAYLOAD")
-          ATTACH_BODY=$(cat "$ATTACH_RESPONSE"); rm "$ATTACH_RESPONSE"
-          echo "cTMS Antwort-Code: $ATTACH_HTTP_CODE"
-          if [ "$ATTACH_HTTP_CODE" -ne 201 ] && [ "$ATTACH_HTTP_CODE" -ne 200 ]; then
-            echo "CRITICAL: Transport-Request fehlgeschlagen! Body: $ATTACH_BODY"
-            exit 1
-          fi
-          echo "================================================================"
-          echo "Transport erfolgreich erzeugt und in ACX_TARGET eingereiht."
-          echo "Details: $ATTACH_BODY"
-          echo "================================================================"
