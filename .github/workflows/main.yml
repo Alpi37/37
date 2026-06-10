@@ -167,19 +167,24 @@ jobs:
           echo "resourceID: $RESOURCE_ID | type: $RESOURCE_TYPE | subType: $RESOURCE_SUBTYPE"
 
           # --- EXPORT-JOB STARTEN ---
-          # exportMode=TransportManagementService: CAS pusht MTAR direkt in cTMS auf ACX_SOURCE.
+          # "id" (= activityId laut Schema) und "exportType" sind required,
+          # fehlten bisher → 400 "id: should not be empty."
+          # Pattern für id: alphanumerisch + [_,-,.], max 40 Zeichen
           EXPORT_PAYLOAD=$(jq -n \
+            --arg id "gh-${PACKAGE_ID}-${RUN_NUMBER}" \
             --arg pkg "$PACKAGE_ID" \
             --arg resourceId "$RESOURCE_ID" \
             --arg type "$RESOURCE_TYPE" \
             --arg subType "$RESOURCE_SUBTYPE" \
             --arg runNum "$RUN_NUMBER" \
             '{
+              "id": $id,
+              "exportType": "MTAR",
               "exportMode": "TransportManagementService",
               "exportMediaType": "MTAR",
               "sourceNode": "ACX_SOURCE",
               "version": ("1.0." + $runNum),
-              "description": ("GitHub Actions Deployment - Run " + $runNum),
+              "description": ("GitHub Actions - Run " + $runNum),
               "requestor": "GitHub Actions",
               "contentResources": [{
                 "resourceID": $resourceId,
@@ -189,6 +194,9 @@ jobs:
                 "version": ("1.0." + $runNum)
               }]
             }')
+
+          # Payload zur Diagnose ausgeben (kein Secret darin)
+          echo "Export Payload: $EXPORT_PAYLOAD"
 
           echo "Starte CAS Export-Job für Paket [$PACKAGE_ID]..."
           EXPORT_RESPONSE=$(curl -s -X POST "${CAS_API_URL}/v1/contentResources/export" \
