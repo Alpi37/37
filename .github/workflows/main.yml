@@ -157,6 +157,9 @@ jobs:
           RESOURCE_SUBTYPE=$(echo "$RESOURCES_RESPONSE" | \
             jq -r --arg pkg "$PACKAGE_ID" \
             '.contentResources[] | select(.id == $pkg) | .subType')
+          RESOURCE_NAME=$(echo "$RESOURCES_RESPONSE" | \
+            jq -r --arg pkg "$PACKAGE_ID" \
+            '.contentResources[] | select(.id == $pkg) | .name')
 
           if [ -z "$RESOURCE_ID" ] || [ "$RESOURCE_ID" == "null" ]; then
             echo "CRITICAL: Paket [$PACKAGE_ID] nicht in CAS contentResources gefunden."
@@ -173,6 +176,7 @@ jobs:
           EXPORT_PAYLOAD=$(jq -n \
             --arg id "gh-${PACKAGE_ID}-${RUN_NUMBER}" \
             --arg pkg "$PACKAGE_ID" \
+            --arg name "$RESOURCE_NAME" \
             --arg resourceId "$RESOURCE_ID" \
             --arg type "$RESOURCE_TYPE" \
             --arg subType "$RESOURCE_SUBTYPE" \
@@ -191,6 +195,7 @@ jobs:
                 "type": $type,
                 "subType": $subType,
                 "id": $pkg,
+                "name": $name,
                 "version": ("1.0." + $runNum)
               }]
             }')
