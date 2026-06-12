@@ -5,7 +5,7 @@ on:
     inputs:
       package_id:
         description: 'Package ID aus der Integration Suite (z.B. AY)'
-        required: true
+        required: false
         default: 'AY'
 
 env:
