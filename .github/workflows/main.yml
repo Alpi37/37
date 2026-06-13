@@ -46,44 +46,84 @@ jobs:
           fi
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-      # --- 3. IFLOWS AUTOMATISCH HERUNTERLADEN & ENTPACKEN ---
-      - name: Download iFlows from Integration Suite
+      # --- 3. ALLE ARTEFAKTE HERUNTERLADEN & ENTPACKEN ---
+      - name: Download Artifacts from Integration Suite
         env:
           CPI_HOST: ${{ vars.CPI_HOST }}
         run: |
           PACKAGE_ID="${{ github.event.inputs.package_id }}"
+          TOKEN="${{ steps.get-token.outputs.token }}"
           mkdir -p "iflows/$PACKAGE_ID"
-          
-          echo "Frage verknüpfte iFlows für Paket [$PACKAGE_ID] ab..."
-          RESPONSE=$(curl -s \
-            "${CPI_HOST}/api/v1/IntegrationPackages('$PACKAGE_ID')/IntegrationDesigntimeArtifacts" \
-            -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
-            -H "Accept: application/json")
-          
-          if [[ ! "$RESPONSE" == \{* ]]; then
-            echo "CRITICAL: SAP hat kein valides JSON zurückgegeben. Antwort:"
-            echo "$RESPONSE"
-            exit 1
-          fi
-          
-          IFLOWS=$(echo "$RESPONSE" | jq -r '.d.results[].Id' 2>/dev/null)
-          if [ -z "$IFLOWS" ] || [ "$IFLOWS" == "null" ]; then
-            echo "CRITICAL: Keine iFlows im Paket $PACKAGE_ID gefunden oder API-Struktur weicht ab."
-            echo "$RESPONSE"
-            exit 1
-          fi
-          
-          for IFLOW_ID in $IFLOWS; do
-            echo "Lade iFlow herunter: $IFLOW_ID"
-            curl -s \
-              "${CPI_HOST}/api/v1/IntegrationDesigntimeArtifacts(Id='${IFLOW_ID}',Version='active')/\$value" \
-              -H "Authorization: Bearer ${{ steps.get-token.outputs.token }}" \
-              -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
-            
-            unzip -o "iflows/$PACKAGE_ID/${IFLOW_ID}.zip" -d "iflows/$PACKAGE_ID/${IFLOW_ID}"
-            rm "iflows/$PACKAGE_ID/${IFLOW_ID}.zip"
+
+          # Mapping: EntitySet-Name → Download-Basis-Pfad
+          # Jeder Typ hat einen eigenen List-Endpoint und einen eigenen /$value-Download
+          declare -A ENDPOINTS=(
+            ["IntegrationDesigntimeArtifacts"]="IntegrationDesigntimeArtifacts"
+            ["MessageMappingDesigntimeArtifacts"]="MessageMappingDesigntimeArtifacts"
+            ["ValueMappingDesigntimeArtifacts"]="ValueMappingDesigntimeArtifacts"
+            ["ScriptCollectionDesigntimeArtifacts"]="ScriptCollectionDesigntimeArtifacts"
+            ["MessageTypeDesigntimeArtifacts"]="MessageTypeDesigntimeArtifacts"
+            ["FaultMessageTypeDesigntimeArtifacts"]="FaultMessageTypeDesigntimeArtifacts"
+            ["DataTypeDesigntimeArtifacts"]="DataTypeDesigntimeArtifacts"
+            ["ServiceInterfaceDesigntimeArtifacts"]="ServiceInterfaceDesigntimeArtifacts"
+          )
+
+          TOTAL_DOWNLOADED=0
+
+          for ENTITY_SET in "${!ENDPOINTS[@]}"; do
+            DOWNLOAD_BASE="${ENDPOINTS[$ENTITY_SET]}"
+
+            echo "--- Frage [$ENTITY_SET] für Paket [$PACKAGE_ID] ab..."
+            RESPONSE=$(curl -s \
+              "${CPI_HOST}/api/v1/IntegrationPackages('${PACKAGE_ID}')/${ENTITY_SET}" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/json")
+
+            # Valides JSON prüfen
+            if [[ ! "$RESPONSE" == \{* ]]; then
+              echo "WARNING: Kein valides JSON von [$ENTITY_SET] — überspringe."
+              continue
+            fi
+
+            # Artefakt-IDs extrahieren
+            ARTIFACT_IDS=$(echo "$RESPONSE" | jq -r '.d.results[].Id' 2>/dev/null)
+            if [ -z "$ARTIFACT_IDS" ]; then
+              echo "  → Keine Artefakte in [$ENTITY_SET]."
+              continue
+            fi
+
+            COUNT=$(echo "$ARTIFACT_IDS" | wc -l | tr -d ' ')
+            echo "  → $COUNT Artefakt(e) gefunden."
+
+            while IFS= read -r ARTIFACT_ID; do
+              [ -z "$ARTIFACT_ID" ] && continue
+              echo "  Lade: $ARTIFACT_ID ($ENTITY_SET)"
+
+              RESPONSE_FILE=$(mktemp)
+              HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
+                "${CPI_HOST}/api/v1/${DOWNLOAD_BASE}(Id='${ARTIFACT_ID}',Version='active')/\$value" \
+                -H "Authorization: Bearer $TOKEN")
+
+              if [ "$HTTP_CODE" -ne 200 ]; then
+                echo "  WARNING: Download fehlgeschlagen für [$ARTIFACT_ID] — HTTP $HTTP_CODE"
+                rm -f "$RESPONSE_FILE"
+                continue
+              fi
+
+              mv "$RESPONSE_FILE" "iflows/$PACKAGE_ID/${ARTIFACT_ID}.zip"
+              unzip -o "iflows/$PACKAGE_ID/${ARTIFACT_ID}.zip" \
+                -d "iflows/$PACKAGE_ID/${ARTIFACT_ID}" > /dev/null 2>&1
+              rm "iflows/$PACKAGE_ID/${ARTIFACT_ID}.zip"
+              echo "  ✓ $ARTIFACT_ID"
+              TOTAL_DOWNLOADED=$((TOTAL_DOWNLOADED + 1))
+            done <<< "$ARTIFACT_IDS"
           done
 
+          echo "=== Gesamt heruntergeladene Artefakte: $TOTAL_DOWNLOADED ==="
+          if [ "$TOTAL_DOWNLOADED" -eq 0 ]; then
+            echo "CRITICAL: Keine Artefakte im Paket $PACKAGE_ID gefunden."
+            exit 1
+          fi
       # --- 4. GIT COMMIT UND PUSH (MIT REBASE-SCHUTZ) ---
       - name: Commit and Push changes to GitHub
         run: |
