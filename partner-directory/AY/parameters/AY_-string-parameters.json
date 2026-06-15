@@ -1,0 +1,16 @@
+[
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='AY',Id='AY')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='AY',Id='AY')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "AY",
+    "Id": "AY",
+    "LastModifiedBy": "alperen.yildirim@basistechnologies.com",
+    "LastModifiedTime": "/Date(1781544994974)/",
+    "CreatedBy": "alperen.yildirim@basistechnologies.com",
+    "CreatedTime": "/Date(1781544994974)/",
+    "Value": ""
+  }
+]

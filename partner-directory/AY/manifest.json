@@ -1,0 +1,6 @@
+{
+  "packageId": "AY",
+  "note": "Partner Directory is tenant-wide CPI data exported through the OData API. It is committed to GitHub, but not transported through CAS/cTMS.",
+  "includeSensitivePartnerDirectory": false,
+  "syncedAt": "2026-06-15T18:02:15Z"
+}

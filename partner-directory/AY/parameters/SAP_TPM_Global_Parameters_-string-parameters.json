@@ -1,0 +1,184 @@
+[
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Technical_Acknowledgement_Overdue')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Technical_Acknowledgement_Overdue')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_Technical_Acknowledgement_Overdue",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759104)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759104)/",
+    "Value": "15"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_IFLOW_STEP3_RETRY_COUNT')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_IFLOW_STEP3_RETRY_COUNT')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_IFLOW_STEP3_RETRY_COUNT",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759131)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759131)/",
+    "Value": "3"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_ENABLE_STEP3_DEAD_LETTER_Q')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_ENABLE_STEP3_DEAD_LETTER_Q')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_ENABLE_STEP3_DEAD_LETTER_Q",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759074)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759074)/",
+    "Value": "false"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Pid_Type')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Pid_Type')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_Pid_Type",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759178)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759178)/",
+    "Value": "GlobalSettings"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Pid_Resource_Last_Modified')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Pid_Resource_Last_Modified')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_Pid_Resource_Last_Modified",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1781219444662)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759242)/",
+    "Value": "1780893109730"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Pid_Resource_Id')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Pid_Resource_Id')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_Pid_Resource_Id",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759090)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759090)/",
+    "Value": "d9119fa053d94d339dc1d2fd0dd16a98"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Pid_Status')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Pid_Status')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_Pid_Status",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759045)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759045)/",
+    "Value": "VALID"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Quality_Of_Service_Default')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Quality_Of_Service_Default')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_Quality_Of_Service_Default",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1750241719155)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1750241719155)/",
+    "Value": "UseIdempotent=False"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_ENABLE_STEP2_DEAD_LETTER_Q')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_ENABLE_STEP2_DEAD_LETTER_Q')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_ENABLE_STEP2_DEAD_LETTER_Q",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759140)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759140)/",
+    "Value": "false"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_AS2_Outbound_Mdn_Target_URL')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_AS2_Outbound_Mdn_Target_URL')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_AS2_Outbound_Mdn_Target_URL",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759114)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759114)/",
+    "Value": "https://bti-payg.it-cpi026-rt.cfapps.eu10-002.hana.ondemand.com/as2/mdn/tpm/b2b/mdn"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_IFLOW_STEP2_RETRY_COUNT')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_IFLOW_STEP2_RETRY_COUNT')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_IFLOW_STEP2_RETRY_COUNT",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759192)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759192)/",
+    "Value": "3"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_TenantHost')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_TenantHost')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_TenantHost",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1779247052085)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1774270720199)/",
+    "Value": "bti-payg.integrationsuite-cpi026.cfapps.eu10-002.hana.ondemand.com"
+  },
+  {
+    "__metadata": {
+      "id": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Functional_Acknowledgement_Overdue')",
+      "uri": "https://bti-payg.it-cpi026.cfapps.eu10-002.hana.ondemand.com:443/api/v1/StringParameters(Pid='SAP_TPM_Global_Parameters',Id='SAP_TPM_Functional_Acknowledgement_Overdue')",
+      "type": "com.sap.hci.api.StringParameter"
+    },
+    "Pid": "SAP_TPM_Global_Parameters",
+    "Id": "SAP_TPM_Functional_Acknowledgement_Overdue",
+    "LastModifiedBy": "TPM_SYSTEM_USER",
+    "LastModifiedTime": "/Date(1739590759228)/",
+    "CreatedBy": "TPM_SYSTEM_USER",
+    "CreatedTime": "/Date(1739590759228)/",
+    "Value": "30"
+  }
+]
