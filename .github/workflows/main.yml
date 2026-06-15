@@ -1,4 +1,4 @@
-name: Sync iFlows to Git & Deploy via SAP cTMS
+name: Sync iFlows, Partner Directory & Deploy via SAP cTMS
 
 on:
   workflow_dispatch:
@@ -8,9 +8,13 @@ on:
         required: false
         default: 'AY'
       include_sensitive_partner_directory:
-        description: 'Auch BinaryParameters und UserCredentialParameters ins Repo schreiben (Achtung: kann Secrets enthalten)'
+        description: 'Also export/import BinaryParameters and UserCredentialParameters'
         required: false
         default: 'false'
+      import_partner_directory_to_target:
+        description: 'Import Partner Directory into target CPI after cTMS export'
+        required: false
+        default: 'true'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -22,13 +26,11 @@ jobs:
       contents: write
 
     steps:
-      # --- 1. REPOSITORY AUSCHECKEN ---
       - name: Checkout this repo
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # --- 2. AUTHENTIFIZIERUNG GEGEN SOURCE CPI (ENTWICKLUNG) ---
       - name: Get Bearer Token for Source CPI
         id: get-token
         env:
@@ -36,7 +38,6 @@ jobs:
           BTP_CLIENT_SECRET: ${{ secrets.IAS_CLIENTSECRET }}
           TOKEN_URL: ${{ vars.BTP_TOKEN_URL }}
         run: |
-          echo "Fordere Token von der Source-Instanz an..."
           RESPONSE=$(curl -s -X POST "$TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=client_credentials" \
@@ -48,9 +49,9 @@ jobs:
             echo "CRITICAL: Auth an Source CPI fehlgeschlagen. Response: $RESPONSE"
             exit 1
           fi
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
 
-      # --- 3. ALLE ARTEFAKTE HERUNTERLADEN & ENTPACKEN ---
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
       - name: Download Artifacts from Integration Suite
         env:
           CPI_HOST: ${{ vars.CPI_HOST }}
@@ -75,7 +76,6 @@ jobs:
           for ENTITY_SET in "${!ENDPOINTS[@]}"; do
             DOWNLOAD_BASE="${ENDPOINTS[$ENTITY_SET]}"
 
-            echo "--- Frage [$ENTITY_SET] fuer Paket [$PACKAGE_ID] ab..."
             RESPONSE=$(curl -s \
               "${CPI_HOST}/api/v1/IntegrationPackages('${PACKAGE_ID}')/${ENTITY_SET}" \
               -H "Authorization: Bearer $TOKEN" \
@@ -88,16 +88,13 @@ jobs:
 
             ARTIFACT_IDS=$(echo "$RESPONSE" | jq -r '.d.results[].Id' 2>/dev/null)
             if [ -z "$ARTIFACT_IDS" ]; then
-              echo "  -> Keine Artefakte in [$ENTITY_SET]."
+              echo "Keine Artefakte in [$ENTITY_SET]."
               continue
             fi
 
-            COUNT=$(echo "$ARTIFACT_IDS" | wc -l | tr -d ' ')
-            echo "  -> $COUNT Artefakt(e) gefunden."
-
             while IFS= read -r ARTIFACT_ID; do
               [ -z "$ARTIFACT_ID" ] && continue
-              echo "  Lade: $ARTIFACT_ID ($ENTITY_SET)"
+              echo "Lade: $ARTIFACT_ID ($ENTITY_SET)"
 
               RESPONSE_FILE=$(mktemp)
               HTTP_CODE=$(curl -s -o "$RESPONSE_FILE" -w "%{http_code}" \
@@ -105,7 +102,7 @@ jobs:
                 -H "Authorization: Bearer $TOKEN")
 
               if [ "$HTTP_CODE" -ne 200 ]; then
-                echo "  WARNING: Download fehlgeschlagen fuer [$ARTIFACT_ID] - HTTP $HTTP_CODE"
+                echo "WARNING: Download fehlgeschlagen fuer [$ARTIFACT_ID] - HTTP $HTTP_CODE"
                 rm -f "$RESPONSE_FILE"
                 continue
               fi
@@ -115,20 +112,15 @@ jobs:
                 -d "iflows/$PACKAGE_ID/${ARTIFACT_ID}" > /dev/null 2>&1
               rm "iflows/$PACKAGE_ID/${ARTIFACT_ID}.zip"
 
-              echo "  OK: $ARTIFACT_ID"
               TOTAL_DOWNLOADED=$((TOTAL_DOWNLOADED + 1))
             done <<< "$ARTIFACT_IDS"
           done
 
-          echo "=== Gesamt heruntergeladene Artefakte: $TOTAL_DOWNLOADED ==="
           if [ "$TOTAL_DOWNLOADED" -eq 0 ]; then
             echo "CRITICAL: Keine Artefakte im Paket $PACKAGE_ID gefunden."
             exit 1
           fi
 
-      # --- 4. PARTNER DIRECTORY AUS SOURCE CPI HERUNTERLADEN ---
-      # Hinweis: Partner Directory ist tenantweit und kein CAS/cTMS Content Package.
-      # Dieser Schritt versioniert die exportierten OData-Daten im GitHub-Repo.
       - name: Download Partner Directory from Source CPI
         env:
           CPI_HOST: ${{ vars.CPI_HOST }}
@@ -146,12 +138,13 @@ jobs:
             local output_file="$2"
             shift 2
 
-            echo "--- Lade Partner Directory EntitySet [$endpoint]..."
+            echo "Lade Partner Directory EntitySet [$endpoint]..."
             HTTP_CODE=$(curl -s -G -o "$output_file.tmp" -w "%{http_code}" \
               "${CPI_HOST}/api/v1/${endpoint}" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Accept: application/json" \
-              "$@")
+              "$@" \
+              --data-urlencode "\$top=1000")
 
             if [ "$HTTP_CODE" -ne 200 ]; then
               echo "WARNING: [$endpoint] konnte nicht geladen werden (HTTP $HTTP_CODE)."
@@ -170,14 +163,10 @@ jobs:
           fetch_collection "AuthorizedUsers" "$OUT_DIR/authorized-users.json"
 
           PARTNER_IDS=$(jq -r '.[].Pid // empty' "$OUT_DIR/partners.json")
-          if [ -z "$PARTNER_IDS" ]; then
-            echo "Keine Partner im Partner Directory gefunden."
-          fi
 
           while IFS= read -r PID; do
             [ -z "$PID" ] && continue
             SAFE_PID=$(echo "$PID" | tr -c 'A-Za-z0-9_.-' '_')
-            echo "--- Lade Parameter fuer Partner [$PID]..."
 
             fetch_collection "StringParameters" \
               "$OUT_DIR/parameters/${SAFE_PID}-string-parameters.json" \
@@ -197,17 +186,13 @@ jobs:
           jq -n \
             --arg packageId "$PACKAGE_ID" \
             --arg includeSensitive "$INCLUDE_SENSITIVE" \
-            --arg syncedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{
               packageId: $packageId,
-              note: "Partner Directory is tenant-wide CPI data exported through the OData API. It is committed to GitHub, but not transported through CAS/cTMS.",
-              includeSensitivePartnerDirectory: ($includeSensitive == "true"),
-              syncedAt: $syncedAt
+              tenantWide: true,
+              note: "Partner Directory is tenant-wide CPI data exported through the OData API. It is committed to GitHub and imported into target CPI with a separate API step.",
+              includeSensitivePartnerDirectory: ($includeSensitive == "true")
             }' > "$OUT_DIR/manifest.json"
 
-          echo "Partner Directory Export gespeichert unter: $OUT_DIR"
-
-      # --- 5. GIT COMMIT UND PUSH (MIT REBASE-SCHUTZ) ---
       - name: Commit and Push changes to GitHub
         run: |
           git config user.email "github-actions@github.com"
@@ -223,9 +208,6 @@ jobs:
             git push origin main
           fi
 
-      # --- 6. EXPORT VIA CAS -> cTMS ---
-      # CAS transportiert das Integration Package nach cTMS.
-      # Partner Directory wird hier nicht mittransportiert, weil es tenantweite OData-Konfiguration ist.
       - name: Export Package via CAS and push to cTMS
         env:
           CAS_CLIENT_ID: ${{ secrets.CAS_CLIENT_ID }}
@@ -237,7 +219,6 @@ jobs:
           RUN_NUMBER="${{ github.run_number }}"
           mkdir -p gen
 
-          echo "Fordere CAS-Token an..."
           CAS_TOKEN_RAW=$(curl -s -X POST "$CAS_TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=client_credentials" \
@@ -249,43 +230,22 @@ jobs:
             echo "CRITICAL: CAS Auth fehlgeschlagen: $CAS_TOKEN_RAW"
             exit 1
           fi
-          echo "CAS Token erhalten."
 
-          echo "Pruefe CAS -> TMS Verbindung und verfuegbare Source-Nodes..."
-          TMS_MODE_RESPONSE=$(curl -s \
-            "${CAS_API_URL}/v1/transportModes" \
-            -H "Authorization: Bearer $CAS_TOKEN" \
-            -H "Accept: application/json")
-          echo "Transport Modes: $TMS_MODE_RESPONSE"
-
-          echo "Ermittle resourceID fuer Paket [$PACKAGE_ID]..."
           RESOURCES_RESPONSE=$(curl -s \
             "${CAS_API_URL}/v1/contentResources" \
             -H "Authorization: Bearer $CAS_TOKEN" \
             -H "Accept: application/json")
-          echo "CAS contentResources Response: $RESOURCES_RESPONSE"
 
-          RESOURCE_ID=$(echo "$RESOURCES_RESPONSE" | \
-            jq -r --arg pkg "$PACKAGE_ID" \
-            '.contentResources[] | select(.id == $pkg) | .resourceID')
-          RESOURCE_TYPE=$(echo "$RESOURCES_RESPONSE" | \
-            jq -r --arg pkg "$PACKAGE_ID" \
-            '.contentResources[] | select(.id == $pkg) | .type')
-          RESOURCE_SUBTYPE=$(echo "$RESOURCES_RESPONSE" | \
-            jq -r --arg pkg "$PACKAGE_ID" \
-            '.contentResources[] | select(.id == $pkg) | .subType')
-          RESOURCE_NAME=$(echo "$RESOURCES_RESPONSE" | \
-            jq -r --arg pkg "$PACKAGE_ID" \
-            '.contentResources[] | select(.id == $pkg) | .name')
+          RESOURCE_ID=$(echo "$RESOURCES_RESPONSE" | jq -r --arg pkg "$PACKAGE_ID" '.contentResources[] | select(.id == $pkg) | .resourceID')
+          RESOURCE_TYPE=$(echo "$RESOURCES_RESPONSE" | jq -r --arg pkg "$PACKAGE_ID" '.contentResources[] | select(.id == $pkg) | .type')
+          RESOURCE_SUBTYPE=$(echo "$RESOURCES_RESPONSE" | jq -r --arg pkg "$PACKAGE_ID" '.contentResources[] | select(.id == $pkg) | .subType')
+          RESOURCE_NAME=$(echo "$RESOURCES_RESPONSE" | jq -r --arg pkg "$PACKAGE_ID" '.contentResources[] | select(.id == $pkg) | .name')
 
           if [ -z "$RESOURCE_ID" ] || [ "$RESOURCE_ID" == "null" ]; then
             echo "CRITICAL: Paket [$PACKAGE_ID] nicht in CAS contentResources gefunden."
-            echo "Verfuegbare Pakete:"
             echo "$RESOURCES_RESPONSE" | jq -r '.contentResources[] | "\(.id) | \(.type)/\(.subType) | \(.resourceID)"'
             exit 1
           fi
-
-          echo "resourceID: $RESOURCE_ID | type: $RESOURCE_TYPE | subType: $RESOURCE_SUBTYPE"
 
           EXPORT_PAYLOAD=$(jq -n \
             --arg id "gh-${PACKAGE_ID}-${RUN_NUMBER}" \
@@ -314,23 +274,18 @@ jobs:
               }]
             }')
 
-          echo "Export Payload: $EXPORT_PAYLOAD"
-
-          echo "Starte CAS Export-Job fuer Paket [$PACKAGE_ID]..."
           EXPORT_RESPONSE=$(curl -s -X POST "${CAS_API_URL}/v1/contentResources/export" \
             -H "Authorization: Bearer $CAS_TOKEN" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
             -d "$EXPORT_PAYLOAD")
-          echo "CAS Export Response: $EXPORT_RESPONSE"
 
           ACTIVITY_ID=$(echo "$EXPORT_RESPONSE" | jq -r '.activityId // empty')
           if [ -z "$ACTIVITY_ID" ] || [ "$ACTIVITY_ID" == "null" ]; then
             echo "CRITICAL: Keine activityId von CAS erhalten."
+            echo "$EXPORT_RESPONSE"
             exit 1
           fi
-
-          echo "CAS Export-Job gestartet. activityId: $ACTIVITY_ID"
 
           MAX_ATTEMPTS=30
           SLEEP_SECONDS=20
@@ -347,14 +302,12 @@ jobs:
 
             STATE=$(echo "$POLL_RESPONSE" | jq -r '.state // empty')
             PROGRESS=$(echo "$POLL_RESPONSE" | jq -r '.progress // "?"')
-
             echo "State: $STATE | Progress: ${PROGRESS}%"
 
             if [ "$STATE" == "FINISHED" ] || [ "$STATE" == "WARNING" ]; then
-              echo "Export abgeschlossen mit Status: $STATE"
               break
             elif [ "$STATE" == "ERROR" ] || [ "$STATE" == "ABORTED" ]; then
-              echo "CRITICAL: CAS Export fehlgeschlagen. Vollstaendige Antwort:"
+              echo "CRITICAL: CAS Export fehlgeschlagen."
               echo "$POLL_RESPONSE"
               exit 1
             fi
@@ -369,21 +322,16 @@ jobs:
             "${CAS_API_URL}/v1/operations/${ACTIVITY_ID}/config" \
             -H "Authorization: Bearer $CAS_TOKEN" \
             -H "Accept: application/json")
-          echo "Operation Config: $CONFIG_RESPONSE"
 
           FILE_ID=$(echo "$CONFIG_RESPONSE" | jq -r '.fileID // empty')
           TR_ID=$(echo "$CONFIG_RESPONSE" | jq -r '.transportRequestID // "N/A"')
           TR_URL=$(echo "$CONFIG_RESPONSE" | jq -r '.transportRequestURL // "N/A"')
 
-          echo "================================================================"
-          echo "CAS Export + cTMS Transport erfolgreich abgeschlossen."
           echo "cTMS Transport-Request ID : $TR_ID"
           echo "cTMS Transport-Request URL: $TR_URL"
-          echo "================================================================"
 
           if [ -n "$FILE_ID" ] && [ "$FILE_ID" != "null" ]; then
             MTAR_FILE="gen/${PACKAGE_ID}-1.0.${RUN_NUMBER}.mtar"
-            echo "Lade MTAR herunter (fileID: $FILE_ID)..."
 
             HTTP_CODE=$(curl -s -o "$MTAR_FILE" -w "%{http_code}" \
               "${CAS_API_URL}/v1/operations/${ACTIVITY_ID}/file/${FILE_ID}" \
@@ -391,18 +339,271 @@ jobs:
               -H "Accept: application/octet-stream")
 
             if [ "$HTTP_CODE" -ne 200 ]; then
-              echo "WARNING: MTAR-Download fehlgeschlagen (HTTP $HTTP_CODE) - Artifact wird uebersprungen."
+              echo "WARNING: MTAR-Download fehlgeschlagen (HTTP $HTTP_CODE)."
               rm -f "$MTAR_FILE"
             else
-              echo "=== Inhalt des heruntergeladenen MTAR ==="
               unzip -l "$MTAR_FILE"
               ls -la gen/*.mtar
             fi
-          else
-            echo "Keine fileID in Operation Config - MTAR-Download uebersprungen."
           fi
 
-      # --- 7. MTAR ALS GIT-ARTIFAKT SICHERN ---
+      - name: Import Partner Directory into Target CPI
+        if: ${{ github.event.inputs.import_partner_directory_to_target == 'true' }}
+        env:
+          TARGET_CLIENT_ID: ${{ secrets.TARGET_IAS_CLIENTID }}
+          TARGET_CLIENT_SECRET: ${{ secrets.TARGET_IAS_CLIENTSECRET }}
+          TARGET_TOKEN_URL: ${{ vars.TARGET_BTP_TOKEN_URL }}
+          TARGET_CPI_HOST: ${{ vars.TARGET_CPI_HOST }}
+        run: |
+          PACKAGE_ID="${{ github.event.inputs.package_id }}"
+          IN_DIR="partner-directory/$PACKAGE_ID"
+
+          if [ ! -d "$IN_DIR" ]; then
+            echo "CRITICAL: Partner Directory Export nicht gefunden: $IN_DIR"
+            exit 1
+          fi
+
+          TARGET_TOKEN_RAW=$(curl -s -X POST "$TARGET_TOKEN_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_id=$TARGET_CLIENT_ID" \
+            --data-urlencode "client_secret=$TARGET_CLIENT_SECRET")
+
+          TARGET_TOKEN=$(echo "$TARGET_TOKEN_RAW" | jq -r '.access_token')
+          if [ "$TARGET_TOKEN" == "null" ] || [ -z "$TARGET_TOKEN" ]; then
+            echo "CRITICAL: Auth an Target CPI fehlgeschlagen: $TARGET_TOKEN_RAW"
+            exit 1
+          fi
+
+          CSRF_HEADERS=$(mktemp)
+          COOKIE_JAR=$(mktemp)
+
+          curl -s -o /dev/null -D "$CSRF_HEADERS" -c "$COOKIE_JAR" \
+            "${TARGET_CPI_HOST}/api/v1/" \
+            -H "Authorization: Bearer $TARGET_TOKEN" \
+            -H "X-CSRF-Token: Fetch"
+
+          CSRF_TOKEN=$(awk 'tolower($1) == "x-csrf-token:" {print $2}' "$CSRF_HEADERS" | tr -d '\r')
+          if [ -z "$CSRF_TOKEN" ]; then
+            echo "CRITICAL: Kein CSRF Token von Target CPI erhalten."
+            cat "$CSRF_HEADERS"
+            exit 1
+          fi
+
+          urlenc() {
+            jq -rn --arg v "$1" '$v|@uri'
+          }
+
+          odata_key() {
+            local escaped
+            escaped=$(printf "%s" "$1" | sed "s/'/''/g")
+            urlenc "$escaped"
+          }
+
+          api_post() {
+            local endpoint="$1"
+            local body="$2"
+            local response_file
+            response_file=$(mktemp)
+
+            HTTP_CODE=$(curl -s -o "$response_file" -w "%{http_code}" \
+              -X POST "${TARGET_CPI_HOST}/api/v1/${endpoint}" \
+              -b "$COOKIE_JAR" \
+              -H "Authorization: Bearer $TARGET_TOKEN" \
+              -H "X-CSRF-Token: $CSRF_TOKEN" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json" \
+              -d "$body")
+
+            echo "$HTTP_CODE"
+            cat "$response_file" >&2
+            rm -f "$response_file"
+          }
+
+          api_put() {
+            local endpoint="$1"
+            local body="$2"
+            local response_file
+            response_file=$(mktemp)
+
+            HTTP_CODE=$(curl -s -o "$response_file" -w "%{http_code}" \
+              -X PUT "${TARGET_CPI_HOST}/api/v1/${endpoint}" \
+              -b "$COOKIE_JAR" \
+              -H "Authorization: Bearer $TARGET_TOKEN" \
+              -H "X-CSRF-Token: $CSRF_TOKEN" \
+              -H "Content-Type: application/json" \
+              -H "Accept: application/json" \
+              -d "$body")
+
+            echo "$HTTP_CODE"
+            cat "$response_file" >&2
+            rm -f "$response_file"
+          }
+
+          echo "Importiere Partners..."
+          jq -c '.[]' "$IN_DIR/partners.json" | while read -r row; do
+            PID=$(echo "$row" | jq -r '.Pid')
+            BODY=$(jq -n --arg Pid "$PID" '{Pid: $Pid}')
+
+            HTTP_CODE=$(api_post "Partners" "$BODY")
+            if [[ "$HTTP_CODE" =~ ^2 ]]; then
+              echo "Partner angelegt: $PID"
+            else
+              echo "Partner existiert bereits oder konnte nicht angelegt werden: $PID"
+            fi
+          done
+
+          echo "Importiere AlternativePartners..."
+          jq -c '.[]' "$IN_DIR/alternative-partners.json" | while read -r row; do
+            AGENCY=$(echo "$row" | jq -r '.Agency')
+            SCHEME=$(echo "$row" | jq -r '.Scheme')
+            ID=$(echo "$row" | jq -r '.Id')
+            PID=$(echo "$row" | jq -r '.Pid')
+            HEXAGENCY=$(echo "$row" | jq -r '.Hexagency')
+            HEXSCHEME=$(echo "$row" | jq -r '.Hexscheme')
+            HEXID=$(echo "$row" | jq -r '.Hexid')
+
+            CREATE_BODY=$(jq -n \
+              --arg Agency "$AGENCY" \
+              --arg Scheme "$SCHEME" \
+              --arg Id "$ID" \
+              --arg Pid "$PID" \
+              '{Agency: $Agency, Scheme: $Scheme, Id: $Id, Pid: $Pid}')
+
+            UPDATE_BODY=$(jq -n --arg Pid "$PID" '{Pid: $Pid}')
+
+            HTTP_CODE=$(api_post "AlternativePartners" "$CREATE_BODY")
+            if [[ "$HTTP_CODE" =~ ^2 ]]; then
+              echo "AlternativePartner angelegt: $AGENCY / $SCHEME / $ID"
+            else
+              KEY="AlternativePartners(Hexagency='$(odata_key "$HEXAGENCY")',Hexscheme='$(odata_key "$HEXSCHEME")',Hexid='$(odata_key "$HEXID")')"
+              PUT_CODE=$(api_put "$KEY" "$UPDATE_BODY")
+              if [[ "$PUT_CODE" =~ ^2 ]]; then
+                echo "AlternativePartner aktualisiert: $AGENCY / $SCHEME / $ID"
+              else
+                echo "WARNING: AlternativePartner konnte nicht importiert werden: $AGENCY / $SCHEME / $ID"
+              fi
+            fi
+          done
+
+          echo "Importiere AuthorizedUsers..."
+          jq -c '.[]' "$IN_DIR/authorized-users.json" | while read -r row; do
+            USER_ID=$(echo "$row" | jq -r '.User')
+            PID=$(echo "$row" | jq -r '.Pid')
+
+            CREATE_BODY=$(jq -n --arg User "$USER_ID" --arg Pid "$PID" '{User: $User, Pid: $Pid}')
+            UPDATE_BODY=$(jq -n --arg Pid "$PID" '{Pid: $Pid}')
+
+            HTTP_CODE=$(api_post "AuthorizedUsers" "$CREATE_BODY")
+            if [[ "$HTTP_CODE" =~ ^2 ]]; then
+              echo "AuthorizedUser angelegt: $USER_ID"
+            else
+              KEY="AuthorizedUsers('$(odata_key "$USER_ID")')"
+              PUT_CODE=$(api_put "$KEY" "$UPDATE_BODY")
+              if [[ "$PUT_CODE" =~ ^2 ]]; then
+                echo "AuthorizedUser aktualisiert: $USER_ID"
+              else
+                echo "WARNING: AuthorizedUser konnte nicht importiert werden: $USER_ID"
+              fi
+            fi
+          done
+
+          echo "Importiere StringParameters..."
+          find "$IN_DIR/parameters" -name '*-string-parameters.json' -print | while read -r file; do
+            jq -c '.[]' "$file" | while read -r row; do
+              PID=$(echo "$row" | jq -r '.Pid')
+              ID=$(echo "$row" | jq -r '.Id')
+              VALUE=$(echo "$row" | jq -r '.Value')
+
+              CREATE_BODY=$(jq -n \
+                --arg Pid "$PID" \
+                --arg Id "$ID" \
+                --arg Value "$VALUE" \
+                '{Pid: $Pid, Id: $Id, Value: $Value}')
+
+              UPDATE_BODY=$(jq -n --arg Value "$VALUE" '{Value: $Value}')
+
+              HTTP_CODE=$(api_post "StringParameters" "$CREATE_BODY")
+              if [[ "$HTTP_CODE" =~ ^2 ]]; then
+                echo "StringParameter angelegt: $PID / $ID"
+              else
+                KEY="StringParameters(Pid='$(odata_key "$PID")',Id='$(odata_key "$ID")')"
+                PUT_CODE=$(api_put "$KEY" "$UPDATE_BODY")
+                if [[ "$PUT_CODE" =~ ^2 ]]; then
+                  echo "StringParameter aktualisiert: $PID / $ID"
+                else
+                  echo "WARNING: StringParameter konnte nicht importiert werden: $PID / $ID"
+                fi
+              fi
+            done
+          done
+
+          echo "Importiere BinaryParameters, falls exportiert..."
+          find "$IN_DIR/parameters" -name '*-binary-parameters.json' -print | while read -r file; do
+            jq -c '.[]' "$file" | while read -r row; do
+              PID=$(echo "$row" | jq -r '.Pid')
+              ID=$(echo "$row" | jq -r '.Id')
+              CONTENT_TYPE=$(echo "$row" | jq -r '.ContentType')
+              VALUE=$(echo "$row" | jq -r '.Value')
+
+              CREATE_BODY=$(jq -n \
+                --arg Pid "$PID" \
+                --arg Id "$ID" \
+                --arg ContentType "$CONTENT_TYPE" \
+                --arg Value "$VALUE" \
+                '{Pid: $Pid, Id: $Id, ContentType: $ContentType, Value: $Value}')
+
+              UPDATE_BODY=$(jq -n \
+                --arg ContentType "$CONTENT_TYPE" \
+                --arg Value "$VALUE" \
+                '{ContentType: $ContentType, Value: $Value}')
+
+              HTTP_CODE=$(api_post "BinaryParameters" "$CREATE_BODY")
+              if [[ "$HTTP_CODE" =~ ^2 ]]; then
+                echo "BinaryParameter angelegt: $PID / $ID"
+              else
+                KEY="BinaryParameters(Pid='$(odata_key "$PID")',Id='$(odata_key "$ID")')"
+                PUT_CODE=$(api_put "$KEY" "$UPDATE_BODY")
+                if [[ "$PUT_CODE" =~ ^2 ]]; then
+                  echo "BinaryParameter aktualisiert: $PID / $ID"
+                else
+                  echo "WARNING: BinaryParameter konnte nicht importiert werden: $PID / $ID"
+                fi
+              fi
+            done
+          done
+
+          echo "Importiere UserCredentialParameters, falls exportiert..."
+          find "$IN_DIR/parameters" -name '*-user-credential-parameters.json' -print | while read -r file; do
+            jq -c '.[]' "$file" | while read -r row; do
+              PID=$(echo "$row" | jq -r '.Pid')
+              ID=$(echo "$row" | jq -r '.Id')
+              USER_VALUE=$(echo "$row" | jq -r '.User')
+              PASSWORD_VALUE=$(echo "$row" | jq -r '.Password // empty')
+
+              if [ -z "$PASSWORD_VALUE" ]; then
+                echo "WARNING: UserCredentialParameter ohne Password wird uebersprungen: $PID / $ID"
+                continue
+              fi
+
+              BODY=$(jq -n \
+                --arg Pid "$PID" \
+                --arg Id "$ID" \
+                --arg User "$USER_VALUE" \
+                --arg Password "$PASSWORD_VALUE" \
+                '{Pid: $Pid, Id: $Id, User: $User, Password: $Password}')
+
+              HTTP_CODE=$(api_post "UserCredentialParameters" "$BODY")
+              if [[ "$HTTP_CODE" =~ ^2 ]]; then
+                echo "UserCredentialParameter importiert: $PID / $ID"
+              else
+                echo "WARNING: UserCredentialParameter konnte nicht importiert werden: $PID / $ID"
+              fi
+            done
+          done
+
+          echo "Partner Directory Import in Target CPI abgeschlossen."
+
       - name: Upload MTAR as Artifact
         uses: actions/upload-artifact@v4
         with:
