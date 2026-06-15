@@ -7,6 +7,10 @@ on:
         description: 'Package ID aus der Integration Suite (z.B. AY)'
         required: false
         default: 'AY'
+      include_sensitive_partner_directory:
+        description: 'Auch BinaryParameters und UserCredentialParameters ins Repo schreiben (Achtung: kann Secrets enthalten)'
+        required: false
+        default: 'false'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -38,7 +42,7 @@ jobs:
             --data-urlencode "grant_type=client_credentials" \
             --data-urlencode "client_id=$BTP_CLIENT_ID" \
             --data-urlencode "client_secret=$BTP_CLIENT_SECRET")
-          
+
           TOKEN=$(echo "$RESPONSE" | jq -r '.access_token')
           if [ "$TOKEN" == "null" ] || [ -z "$TOKEN" ]; then
             echo "CRITICAL: Auth an Source CPI fehlgeschlagen. Response: $RESPONSE"
@@ -55,8 +59,6 @@ jobs:
           TOKEN="${{ steps.get-token.outputs.token }}"
           mkdir -p "iflows/$PACKAGE_ID"
 
-          # Mapping: EntitySet-Name → Download-Basis-Pfad
-          # Jeder Typ hat einen eigenen List-Endpoint und einen eigenen /$value-Download
           declare -A ENDPOINTS=(
             ["IntegrationDesigntimeArtifacts"]="IntegrationDesigntimeArtifacts"
             ["MessageMappingDesigntimeArtifacts"]="MessageMappingDesigntimeArtifacts"
@@ -73,27 +75,25 @@ jobs:
           for ENTITY_SET in "${!ENDPOINTS[@]}"; do
             DOWNLOAD_BASE="${ENDPOINTS[$ENTITY_SET]}"
 
-            echo "--- Frage [$ENTITY_SET] für Paket [$PACKAGE_ID] ab..."
+            echo "--- Frage [$ENTITY_SET] fuer Paket [$PACKAGE_ID] ab..."
             RESPONSE=$(curl -s \
               "${CPI_HOST}/api/v1/IntegrationPackages('${PACKAGE_ID}')/${ENTITY_SET}" \
               -H "Authorization: Bearer $TOKEN" \
               -H "Accept: application/json")
 
-            # Valides JSON prüfen
             if [[ ! "$RESPONSE" == \{* ]]; then
-              echo "WARNING: Kein valides JSON von [$ENTITY_SET] — überspringe."
+              echo "WARNING: Kein valides JSON von [$ENTITY_SET] - ueberspringe."
               continue
             fi
 
-            # Artefakt-IDs extrahieren
             ARTIFACT_IDS=$(echo "$RESPONSE" | jq -r '.d.results[].Id' 2>/dev/null)
             if [ -z "$ARTIFACT_IDS" ]; then
-              echo "  → Keine Artefakte in [$ENTITY_SET]."
+              echo "  -> Keine Artefakte in [$ENTITY_SET]."
               continue
             fi
 
             COUNT=$(echo "$ARTIFACT_IDS" | wc -l | tr -d ' ')
-            echo "  → $COUNT Artefakt(e) gefunden."
+            echo "  -> $COUNT Artefakt(e) gefunden."
 
             while IFS= read -r ARTIFACT_ID; do
               [ -z "$ARTIFACT_ID" ] && continue
@@ -105,7 +105,7 @@ jobs:
                 -H "Authorization: Bearer $TOKEN")
 
               if [ "$HTTP_CODE" -ne 200 ]; then
-                echo "  WARNING: Download fehlgeschlagen für [$ARTIFACT_ID] — HTTP $HTTP_CODE"
+                echo "  WARNING: Download fehlgeschlagen fuer [$ARTIFACT_ID] - HTTP $HTTP_CODE"
                 rm -f "$RESPONSE_FILE"
                 continue
               fi
@@ -114,7 +114,8 @@ jobs:
               unzip -o "iflows/$PACKAGE_ID/${ARTIFACT_ID}.zip" \
                 -d "iflows/$PACKAGE_ID/${ARTIFACT_ID}" > /dev/null 2>&1
               rm "iflows/$PACKAGE_ID/${ARTIFACT_ID}.zip"
-              echo "  ✓ $ARTIFACT_ID"
+
+              echo "  OK: $ARTIFACT_ID"
               TOTAL_DOWNLOADED=$((TOTAL_DOWNLOADED + 1))
             done <<< "$ARTIFACT_IDS"
           done
@@ -124,26 +125,107 @@ jobs:
             echo "CRITICAL: Keine Artefakte im Paket $PACKAGE_ID gefunden."
             exit 1
           fi
-      # --- 4. GIT COMMIT UND PUSH (MIT REBASE-SCHUTZ) ---
+
+      # --- 4. PARTNER DIRECTORY AUS SOURCE CPI HERUNTERLADEN ---
+      # Hinweis: Partner Directory ist tenantweit und kein CAS/cTMS Content Package.
+      # Dieser Schritt versioniert die exportierten OData-Daten im GitHub-Repo.
+      - name: Download Partner Directory from Source CPI
+        env:
+          CPI_HOST: ${{ vars.CPI_HOST }}
+        run: |
+          PACKAGE_ID="${{ github.event.inputs.package_id }}"
+          TOKEN="${{ steps.get-token.outputs.token }}"
+          INCLUDE_SENSITIVE="${{ github.event.inputs.include_sensitive_partner_directory }}"
+          OUT_DIR="partner-directory/$PACKAGE_ID"
+
+          rm -rf "$OUT_DIR"
+          mkdir -p "$OUT_DIR/parameters"
+
+          fetch_collection() {
+            local endpoint="$1"
+            local output_file="$2"
+            shift 2
+
+            echo "--- Lade Partner Directory EntitySet [$endpoint]..."
+            HTTP_CODE=$(curl -s -G -o "$output_file.tmp" -w "%{http_code}" \
+              "${CPI_HOST}/api/v1/${endpoint}" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/json" \
+              "$@")
+
+            if [ "$HTTP_CODE" -ne 200 ]; then
+              echo "WARNING: [$endpoint] konnte nicht geladen werden (HTTP $HTTP_CODE)."
+              cat "$output_file.tmp"
+              rm -f "$output_file.tmp"
+              echo "[]" > "$output_file"
+              return 0
+            fi
+
+            jq '.d.results // []' "$output_file.tmp" > "$output_file"
+            rm -f "$output_file.tmp"
+          }
+
+          fetch_collection "Partners" "$OUT_DIR/partners.json"
+          fetch_collection "AlternativePartners" "$OUT_DIR/alternative-partners.json"
+          fetch_collection "AuthorizedUsers" "$OUT_DIR/authorized-users.json"
+
+          PARTNER_IDS=$(jq -r '.[].Pid // empty' "$OUT_DIR/partners.json")
+          if [ -z "$PARTNER_IDS" ]; then
+            echo "Keine Partner im Partner Directory gefunden."
+          fi
+
+          while IFS= read -r PID; do
+            [ -z "$PID" ] && continue
+            SAFE_PID=$(echo "$PID" | tr -c 'A-Za-z0-9_.-' '_')
+            echo "--- Lade Parameter fuer Partner [$PID]..."
+
+            fetch_collection "StringParameters" \
+              "$OUT_DIR/parameters/${SAFE_PID}-string-parameters.json" \
+              --data-urlencode "\$filter=Pid eq '$PID'"
+
+            if [ "$INCLUDE_SENSITIVE" = "true" ]; then
+              fetch_collection "BinaryParameters" \
+                "$OUT_DIR/parameters/${SAFE_PID}-binary-parameters.json" \
+                --data-urlencode "\$filter=Pid eq '$PID'"
+
+              fetch_collection "UserCredentialParameters" \
+                "$OUT_DIR/parameters/${SAFE_PID}-user-credential-parameters.json" \
+                --data-urlencode "\$filter=Pid eq '$PID'"
+            fi
+          done <<< "$PARTNER_IDS"
+
+          jq -n \
+            --arg packageId "$PACKAGE_ID" \
+            --arg includeSensitive "$INCLUDE_SENSITIVE" \
+            --arg syncedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              packageId: $packageId,
+              note: "Partner Directory is tenant-wide CPI data exported through the OData API. It is committed to GitHub, but not transported through CAS/cTMS.",
+              includeSensitivePartnerDirectory: ($includeSensitive == "true"),
+              syncedAt: $syncedAt
+            }' > "$OUT_DIR/manifest.json"
+
+          echo "Partner Directory Export gespeichert unter: $OUT_DIR"
+
+      # --- 5. GIT COMMIT UND PUSH (MIT REBASE-SCHUTZ) ---
       - name: Commit and Push changes to GitHub
         run: |
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
-          git add iflows/
-          
+          git add iflows/ partner-directory/
+
           if git diff --staged --quiet; then
-            echo "Keine Änderungen im iFlow-Code festgestellt. Überspringe Push."
+            echo "Keine Aenderungen an iFlows oder Partner Directory festgestellt. Ueberspringe Push."
           else
-            git commit -m "Sync iFlows from package ${{ github.event.inputs.package_id }} [skip ci]"
+            git commit -m "Sync CPI content and partner directory from package ${{ github.event.inputs.package_id }} [skip ci]"
             git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}.git
             git pull origin main --rebase
             git push origin main
           fi
 
-      # --- 5. EXPORT VIA CAS → cTMS ---
-      # CAS übernimmt vollständig: MTAR bauen, in cTMS hochladen, Transport-Request anlegen.
-      # exportMode=TransportManagementService → Step 7 (manueller cTMS-Upload) entfällt.
-      # resourceID wird dynamisch via /v1/contentResources ermittelt → CPI_RESOURCE_IDS entfällt.
+      # --- 6. EXPORT VIA CAS -> cTMS ---
+      # CAS transportiert das Integration Package nach cTMS.
+      # Partner Directory wird hier nicht mittransportiert, weil es tenantweite OData-Konfiguration ist.
       - name: Export Package via CAS and push to cTMS
         env:
           CAS_CLIENT_ID: ${{ secrets.CAS_CLIENT_ID }}
@@ -155,13 +237,13 @@ jobs:
           RUN_NUMBER="${{ github.run_number }}"
           mkdir -p gen
 
-          # --- AUTH ---
           echo "Fordere CAS-Token an..."
           CAS_TOKEN_RAW=$(curl -s -X POST "$CAS_TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=client_credentials" \
             --data-urlencode "client_id=$CAS_CLIENT_ID" \
             --data-urlencode "client_secret=$CAS_CLIENT_SECRET")
+
           CAS_TOKEN=$(echo "$CAS_TOKEN_RAW" | jq -r '.access_token')
           if [ "$CAS_TOKEN" == "null" ] || [ -z "$CAS_TOKEN" ]; then
             echo "CRITICAL: CAS Auth fehlgeschlagen: $CAS_TOKEN_RAW"
@@ -169,19 +251,14 @@ jobs:
           fi
           echo "CAS Token erhalten."
 
-          # --- TMS-VERBINDUNG PRÜFEN (Diagnose) ---
-          echo "Prüfe CAS → TMS Verbindung und verfügbare Source-Nodes..."
+          echo "Pruefe CAS -> TMS Verbindung und verfuegbare Source-Nodes..."
           TMS_MODE_RESPONSE=$(curl -s \
             "${CAS_API_URL}/v1/transportModes" \
             -H "Authorization: Bearer $CAS_TOKEN" \
             -H "Accept: application/json")
           echo "Transport Modes: $TMS_MODE_RESPONSE"
-          # sourceNode=ACX_SOURCE muss in der Liste der sourceNodes auftauchen.
-          # Falls nicht → CAS-TMS-Destination prüfen (BTP Cockpit → Destinations).
 
-          # --- RESOURCE-ID DYNAMISCH ERMITTELN ---
-          # CAS kennt alle Pakete des Tenants. Wir filtern nach PACKAGE_ID.
-          echo "Ermittle resourceID für Paket [$PACKAGE_ID]..."
+          echo "Ermittle resourceID fuer Paket [$PACKAGE_ID]..."
           RESOURCES_RESPONSE=$(curl -s \
             "${CAS_API_URL}/v1/contentResources" \
             -H "Authorization: Bearer $CAS_TOKEN" \
@@ -203,16 +280,13 @@ jobs:
 
           if [ -z "$RESOURCE_ID" ] || [ "$RESOURCE_ID" == "null" ]; then
             echo "CRITICAL: Paket [$PACKAGE_ID] nicht in CAS contentResources gefunden."
-            echo "Verfügbare Pakete:"
+            echo "Verfuegbare Pakete:"
             echo "$RESOURCES_RESPONSE" | jq -r '.contentResources[] | "\(.id) | \(.type)/\(.subType) | \(.resourceID)"'
             exit 1
           fi
+
           echo "resourceID: $RESOURCE_ID | type: $RESOURCE_TYPE | subType: $RESOURCE_SUBTYPE"
 
-          # --- EXPORT-JOB STARTEN ---
-          # "id" (= activityId laut Schema) und "exportType" sind required,
-          # fehlten bisher → 400 "id: should not be empty."
-          # Pattern für id: alphanumerisch + [_,-,.], max 40 Zeichen
           EXPORT_PAYLOAD=$(jq -n \
             --arg id "gh-${PACKAGE_ID}-${RUN_NUMBER}" \
             --arg pkg "$PACKAGE_ID" \
@@ -240,10 +314,9 @@ jobs:
               }]
             }')
 
-          # Payload zur Diagnose ausgeben (kein Secret darin)
           echo "Export Payload: $EXPORT_PAYLOAD"
 
-          echo "Starte CAS Export-Job für Paket [$PACKAGE_ID]..."
+          echo "Starte CAS Export-Job fuer Paket [$PACKAGE_ID]..."
           EXPORT_RESPONSE=$(curl -s -X POST "${CAS_API_URL}/v1/contentResources/export" \
             -H "Authorization: Bearer $CAS_TOKEN" \
             -H "Content-Type: application/json" \
@@ -256,39 +329,42 @@ jobs:
             echo "CRITICAL: Keine activityId von CAS erhalten."
             exit 1
           fi
+
           echo "CAS Export-Job gestartet. activityId: $ACTIVITY_ID"
 
-          # --- POLLEN BIS FINISHED ---
-          # Endzustände laut API-Doku: FINISHED, WARNING, ERROR, ABORTED
-          # Maximal 30 × 20s = 10 Minuten Timeout
           MAX_ATTEMPTS=30
           SLEEP_SECONDS=20
           STATE="UNKNOWN"
+
           for i in $(seq 1 $MAX_ATTEMPTS); do
-            echo "Poll $i/$MAX_ATTEMPTS — warte ${SLEEP_SECONDS}s..."
+            echo "Poll $i/$MAX_ATTEMPTS - warte ${SLEEP_SECONDS}s..."
             sleep $SLEEP_SECONDS
+
             POLL_RESPONSE=$(curl -s \
               "${CAS_API_URL}/v1/operations/${ACTIVITY_ID}" \
               -H "Authorization: Bearer $CAS_TOKEN" \
               -H "Accept: application/json")
+
             STATE=$(echo "$POLL_RESPONSE" | jq -r '.state // empty')
             PROGRESS=$(echo "$POLL_RESPONSE" | jq -r '.progress // "?"')
+
             echo "State: $STATE | Progress: ${PROGRESS}%"
+
             if [ "$STATE" == "FINISHED" ] || [ "$STATE" == "WARNING" ]; then
               echo "Export abgeschlossen mit Status: $STATE"
               break
             elif [ "$STATE" == "ERROR" ] || [ "$STATE" == "ABORTED" ]; then
-              echo "CRITICAL: CAS Export fehlgeschlagen. Vollständige Antwort:"
+              echo "CRITICAL: CAS Export fehlgeschlagen. Vollstaendige Antwort:"
               echo "$POLL_RESPONSE"
               exit 1
             fi
           done
+
           if [ "$STATE" != "FINISHED" ] && [ "$STATE" != "WARNING" ]; then
             echo "CRITICAL: Timeout nach $((MAX_ATTEMPTS * SLEEP_SECONDS))s. Letzter State: $STATE"
             exit 1
           fi
 
-          # --- OPERATION CONFIG: fileID + cTMS Transport-Request-Info ---
           CONFIG_RESPONSE=$(curl -s \
             "${CAS_API_URL}/v1/operations/${ACTIVITY_ID}/config" \
             -H "Authorization: Bearer $CAS_TOKEN" \
@@ -305,16 +381,17 @@ jobs:
           echo "cTMS Transport-Request URL: $TR_URL"
           echo "================================================================"
 
-          # --- MTAR HERUNTERLADEN (für Artifact-Archivierung in Step 6) ---
           if [ -n "$FILE_ID" ] && [ "$FILE_ID" != "null" ]; then
             MTAR_FILE="gen/${PACKAGE_ID}-1.0.${RUN_NUMBER}.mtar"
             echo "Lade MTAR herunter (fileID: $FILE_ID)..."
+
             HTTP_CODE=$(curl -s -o "$MTAR_FILE" -w "%{http_code}" \
               "${CAS_API_URL}/v1/operations/${ACTIVITY_ID}/file/${FILE_ID}" \
               -H "Authorization: Bearer $CAS_TOKEN" \
               -H "Accept: application/octet-stream")
+
             if [ "$HTTP_CODE" -ne 200 ]; then
-              echo "WARNING: MTAR-Download fehlgeschlagen (HTTP $HTTP_CODE) — Artifact wird übersprungen."
+              echo "WARNING: MTAR-Download fehlgeschlagen (HTTP $HTTP_CODE) - Artifact wird uebersprungen."
               rm -f "$MTAR_FILE"
             else
               echo "=== Inhalt des heruntergeladenen MTAR ==="
@@ -322,10 +399,10 @@ jobs:
               ls -la gen/*.mtar
             fi
           else
-            echo "Keine fileID in Operation Config — MTAR-Download übersprungen."
+            echo "Keine fileID in Operation Config - MTAR-Download uebersprungen."
           fi
 
-      # --- 6. MTAR ALS GIT-ARTIFAKT SICHERN ---
+      # --- 7. MTAR ALS GIT-ARTIFAKT SICHERN ---
       - name: Upload MTAR as Artifact
         uses: actions/upload-artifact@v4
         with:
