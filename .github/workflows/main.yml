@@ -26,12 +26,14 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout this repo
+      # --- #1 REPOSITORY AUSCHECKEN ---
+      - name: "#1 Checkout this repo"
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Get Bearer Token for Source CPI
+      # --- #2 AUTHENTIFIZIERUNG GEGEN SOURCE CPI ---
+      - name: "#2 Get Bearer Token for Source CPI"
         id: get-token
         env:
           BTP_CLIENT_ID: ${{ secrets.IAS_CLIENTID }}
@@ -52,7 +54,8 @@ jobs:
 
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
-      - name: Download Artifacts from Integration Suite
+      # --- #3 IFLOWS / ARTEFAKTE AUS SOURCE CPI HERUNTERLADEN ---
+      - name: "#3 Download Artifacts from Integration Suite"
         env:
           CPI_HOST: ${{ vars.CPI_HOST }}
         run: |
@@ -121,7 +124,8 @@ jobs:
             exit 1
           fi
 
-      - name: Download Partner Directory from Source CPI
+      # --- #4 PARTNER DIRECTORY AUS SOURCE CPI HERUNTERLADEN ---
+      - name: "#4 Download Partner Directory from Source CPI"
         env:
           CPI_HOST: ${{ vars.CPI_HOST }}
         run: |
@@ -193,7 +197,8 @@ jobs:
               includeSensitivePartnerDirectory: ($includeSensitive == "true")
             }' > "$OUT_DIR/manifest.json"
 
-      - name: Commit and Push changes to GitHub
+      # --- #5 IFLOWS + PARTNER DIRECTORY NACH GITHUB PUSHEN ---
+      - name: "#5 Commit and Push changes to GitHub"
         run: |
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
@@ -208,7 +213,8 @@ jobs:
             git push origin main
           fi
 
-      - name: Export Package via CAS and push to cTMS
+      # --- #6 PACKAGE VIA CAS NACH CTMS EXPORTIEREN ---
+      - name: "#6 Export Package via CAS and push to cTMS"
         env:
           CAS_CLIENT_ID: ${{ secrets.CAS_CLIENT_ID }}
           CAS_CLIENT_SECRET: ${{ secrets.CAS_CLIENT_SECRET }}
@@ -347,7 +353,8 @@ jobs:
             fi
           fi
 
-      - name: Import Partner Directory into Target CPI
+      # --- #7 PARTNER DIRECTORY IN TARGET CPI IMPORTIEREN ---
+      - name: "#7 Import Partner Directory into Target CPI"
         if: ${{ github.event.inputs.import_partner_directory_to_target == 'true' }}
         env:
           TARGET_CLIENT_ID: ${{ secrets.TARGET_IAS_CLIENTID }}
@@ -400,6 +407,17 @@ jobs:
             urlenc "$escaped"
           }
 
+          fail_on_auth_error() {
+            local code="$1"
+            local action="$2"
+
+            if [ "$code" = "401" ] || [ "$code" = "403" ]; then
+              echo "CRITICAL: Keine Berechtigung fuer [$action] in Target CPI. HTTP $code"
+              echo "Bitte TARGET_IAS_CLIENTID / Role Collections / Target CPI API-Rechte pruefen."
+              exit 1
+            fi
+          }
+
           api_post() {
             local endpoint="$1"
             local body="$2"
@@ -446,6 +464,8 @@ jobs:
             BODY=$(jq -n --arg Pid "$PID" '{Pid: $Pid}')
 
             HTTP_CODE=$(api_post "Partners" "$BODY")
+            fail_on_auth_error "$HTTP_CODE" "POST Partners"
+
             if [[ "$HTTP_CODE" =~ ^2 ]]; then
               echo "Partner angelegt: $PID"
             else
@@ -473,11 +493,15 @@ jobs:
             UPDATE_BODY=$(jq -n --arg Pid "$PID" '{Pid: $Pid}')
 
             HTTP_CODE=$(api_post "AlternativePartners" "$CREATE_BODY")
+            fail_on_auth_error "$HTTP_CODE" "POST AlternativePartners"
+
             if [[ "$HTTP_CODE" =~ ^2 ]]; then
               echo "AlternativePartner angelegt: $AGENCY / $SCHEME / $ID"
             else
               KEY="AlternativePartners(Hexagency='$(odata_key "$HEXAGENCY")',Hexscheme='$(odata_key "$HEXSCHEME")',Hexid='$(odata_key "$HEXID")')"
               PUT_CODE=$(api_put "$KEY" "$UPDATE_BODY")
+              fail_on_auth_error "$PUT_CODE" "PUT AlternativePartners"
+
               if [[ "$PUT_CODE" =~ ^2 ]]; then
                 echo "AlternativePartner aktualisiert: $AGENCY / $SCHEME / $ID"
               else
@@ -495,11 +519,15 @@ jobs:
             UPDATE_BODY=$(jq -n --arg Pid "$PID" '{Pid: $Pid}')
 
             HTTP_CODE=$(api_post "AuthorizedUsers" "$CREATE_BODY")
+            fail_on_auth_error "$HTTP_CODE" "POST AuthorizedUsers"
+
             if [[ "$HTTP_CODE" =~ ^2 ]]; then
               echo "AuthorizedUser angelegt: $USER_ID"
             else
               KEY="AuthorizedUsers('$(odata_key "$USER_ID")')"
               PUT_CODE=$(api_put "$KEY" "$UPDATE_BODY")
+              fail_on_auth_error "$PUT_CODE" "PUT AuthorizedUsers"
+
               if [[ "$PUT_CODE" =~ ^2 ]]; then
                 echo "AuthorizedUser aktualisiert: $USER_ID"
               else
@@ -524,11 +552,15 @@ jobs:
               UPDATE_BODY=$(jq -n --arg Value "$VALUE" '{Value: $Value}')
 
               HTTP_CODE=$(api_post "StringParameters" "$CREATE_BODY")
+              fail_on_auth_error "$HTTP_CODE" "POST StringParameters"
+
               if [[ "$HTTP_CODE" =~ ^2 ]]; then
                 echo "StringParameter angelegt: $PID / $ID"
               else
                 KEY="StringParameters(Pid='$(odata_key "$PID")',Id='$(odata_key "$ID")')"
                 PUT_CODE=$(api_put "$KEY" "$UPDATE_BODY")
+                fail_on_auth_error "$PUT_CODE" "PUT StringParameters"
+
                 if [[ "$PUT_CODE" =~ ^2 ]]; then
                   echo "StringParameter aktualisiert: $PID / $ID"
                 else
@@ -559,11 +591,15 @@ jobs:
                 '{ContentType: $ContentType, Value: $Value}')
 
               HTTP_CODE=$(api_post "BinaryParameters" "$CREATE_BODY")
+              fail_on_auth_error "$HTTP_CODE" "POST BinaryParameters"
+
               if [[ "$HTTP_CODE" =~ ^2 ]]; then
                 echo "BinaryParameter angelegt: $PID / $ID"
               else
                 KEY="BinaryParameters(Pid='$(odata_key "$PID")',Id='$(odata_key "$ID")')"
                 PUT_CODE=$(api_put "$KEY" "$UPDATE_BODY")
+                fail_on_auth_error "$PUT_CODE" "PUT BinaryParameters"
+
                 if [[ "$PUT_CODE" =~ ^2 ]]; then
                   echo "BinaryParameter aktualisiert: $PID / $ID"
                 else
@@ -594,6 +630,8 @@ jobs:
                 '{Pid: $Pid, Id: $Id, User: $User, Password: $Password}')
 
               HTTP_CODE=$(api_post "UserCredentialParameters" "$BODY")
+              fail_on_auth_error "$HTTP_CODE" "POST UserCredentialParameters"
+
               if [[ "$HTTP_CODE" =~ ^2 ]]; then
                 echo "UserCredentialParameter importiert: $PID / $ID"
               else
@@ -604,7 +642,8 @@ jobs:
 
           echo "Partner Directory Import in Target CPI abgeschlossen."
 
-      - name: Upload MTAR as Artifact
+      # --- #8 MTAR ALS GITHUB ARTIFACT SICHERN ---
+      - name: "#8 Upload MTAR as Artifact"
         uses: actions/upload-artifact@v4
         with:
           name: transport-package
