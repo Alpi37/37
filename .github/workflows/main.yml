@@ -14,7 +14,7 @@ on:
       import_partner_directory_to_target:
         description: 'Import Partner Directory into target CPI after cTMS export'
         required: false
-        default: 'true'
+        default: 'false'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -125,6 +125,11 @@ jobs:
           fi
 
       # --- #4 PARTNER DIRECTORY AUS SOURCE CPI HERUNTERLADEN ---
+      # Partner Directory ist tenant-weit, nicht paketgebunden.
+      # AlternativePartners und AuthorizedUsers werden vollstaendig (ohne Filter) exportiert.
+      # BinaryParameters und UserCredentialParameters nur bei include_sensitive=true.
+      # Passwoerter in UserCredentialParameters werden im Export gespeichert – nur aktivieren,
+      # wenn das Repository entsprechend geschuetzt ist (private + branch protection).
       - name: "#4 Download Partner Directory from Source CPI"
         env:
           CPI_HOST: ${{ vars.CPI_HOST }}
@@ -137,6 +142,9 @@ jobs:
           rm -rf "$OUT_DIR"
           mkdir -p "$OUT_DIR/parameters"
 
+          # Hilfsfunktion: Ein OData-EntitySet laden und .d.results[] in Datei schreiben.
+          # Zusaetzliche curl-Parameter (z.B. --data-urlencode "$filter=...") per "$@" moeglich.
+          # $top ist fest auf 1000 gesetzt – bei Tenants mit mehr Eintraegen Paging ergaenzen.
           fetch_collection() {
             local endpoint="$1"
             local output_file="$2"
@@ -162,10 +170,12 @@ jobs:
             rm -f "$output_file.tmp"
           }
 
-          fetch_collection "Partners" "$OUT_DIR/partners.json"
+          # Tenant-weite Kollektionen (kein Pid-Filter noetig)
+          fetch_collection "Partners"            "$OUT_DIR/partners.json"
           fetch_collection "AlternativePartners" "$OUT_DIR/alternative-partners.json"
-          fetch_collection "AuthorizedUsers" "$OUT_DIR/authorized-users.json"
+          fetch_collection "AuthorizedUsers"     "$OUT_DIR/authorized-users.json"
 
+          # Pro-Partner-Kollektionen
           PARTNER_IDS=$(jq -r '.[].Pid // empty' "$OUT_DIR/partners.json")
 
           while IFS= read -r PID; do
@@ -354,6 +364,13 @@ jobs:
           fi
 
       # --- #7 PARTNER DIRECTORY IN TARGET CPI IMPORTIEREN ---
+      # Voraussetzungen (Secrets/Vars muessen konfiguriert sein):
+      #   TARGET_IAS_CLIENTID, TARGET_IAS_CLIENTSECRET → secrets
+      #   TARGET_BTP_TOKEN_URL, TARGET_CPI_HOST        → vars
+      #
+      # WICHTIG: exit 1 in Schleifen funktioniert nur korrekt mit Process Substitution
+      # (done < <(jq ...)), nicht mit Pipes (jq ... | while read), da Pipes eine
+      # Subshell erzeugen, in der exit 1 den uebergeordneten Step nicht beendet.
       - name: "#7 Import Partner Directory into Target CPI"
         if: ${{ github.event.inputs.import_partner_directory_to_target == 'true' }}
         env:
@@ -370,6 +387,7 @@ jobs:
             exit 1
           fi
 
+          # --- Auth gegen Target CPI ---
           TARGET_TOKEN_RAW=$(curl -s -X POST "$TARGET_TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=client_credentials" \
@@ -382,6 +400,7 @@ jobs:
             exit 1
           fi
 
+          # --- CSRF Token holen ---
           CSRF_HEADERS=$(mktemp)
           COOKIE_JAR=$(mktemp)
 
@@ -397,6 +416,9 @@ jobs:
             exit 1
           fi
 
+          # --- Hilfsfunktionen ---
+
+          # OData-sichere URL-Kodierung eines Strings (einfache Anfuehrungszeichen verdoppeln)
           urlenc() {
             jq -rn --arg v "$1" '$v|@uri'
           }
@@ -407,10 +429,10 @@ jobs:
             urlenc "$escaped"
           }
 
+          # Bricht den Step ab bei 401/403 – nur wirksam wenn NICHT in einer Pipe-Subshell
           fail_on_auth_error() {
             local code="$1"
             local action="$2"
-
             if [ "$code" = "401" ] || [ "$code" = "403" ]; then
               echo "CRITICAL: Keine Berechtigung fuer [$action] in Target CPI. HTTP $code"
               echo "Bitte TARGET_IAS_CLIENTID / Role Collections / Target CPI API-Rechte pruefen."
@@ -458,8 +480,9 @@ jobs:
             rm -f "$response_file"
           }
 
-          echo "Importiere Partners..."
-          jq -c '.[]' "$IN_DIR/partners.json" | while read -r row; do
+          # --- Partners ---
+          echo "=== Importiere Partners ==="
+          while read -r row; do
             PID=$(echo "$row" | jq -r '.Pid')
             BODY=$(jq -n --arg Pid "$PID" '{Pid: $Pid}')
 
@@ -469,12 +492,13 @@ jobs:
             if [[ "$HTTP_CODE" =~ ^2 ]]; then
               echo "Partner angelegt: $PID"
             else
-              echo "Partner existiert bereits oder konnte nicht angelegt werden: $PID"
+              echo "Partner existiert bereits oder Fehler (HTTP $HTTP_CODE): $PID"
             fi
-          done
+          done < <(jq -c '.[]' "$IN_DIR/partners.json")
 
-          echo "Importiere AlternativePartners..."
-          jq -c '.[]' "$IN_DIR/alternative-partners.json" | while read -r row; do
+          # --- AlternativePartners ---
+          echo "=== Importiere AlternativePartners ==="
+          while read -r row; do
             AGENCY=$(echo "$row" | jq -r '.Agency')
             SCHEME=$(echo "$row" | jq -r '.Scheme')
             ID=$(echo "$row" | jq -r '.Id')
@@ -505,13 +529,14 @@ jobs:
               if [[ "$PUT_CODE" =~ ^2 ]]; then
                 echo "AlternativePartner aktualisiert: $AGENCY / $SCHEME / $ID"
               else
-                echo "WARNING: AlternativePartner konnte nicht importiert werden: $AGENCY / $SCHEME / $ID"
+                echo "WARNING: AlternativePartner konnte nicht importiert werden: $AGENCY / $SCHEME / $ID (HTTP $PUT_CODE)"
               fi
             fi
-          done
+          done < <(jq -c '.[]' "$IN_DIR/alternative-partners.json")
 
-          echo "Importiere AuthorizedUsers..."
-          jq -c '.[]' "$IN_DIR/authorized-users.json" | while read -r row; do
+          # --- AuthorizedUsers ---
+          echo "=== Importiere AuthorizedUsers ==="
+          while read -r row; do
             USER_ID=$(echo "$row" | jq -r '.User')
             PID=$(echo "$row" | jq -r '.Pid')
 
@@ -531,14 +556,15 @@ jobs:
               if [[ "$PUT_CODE" =~ ^2 ]]; then
                 echo "AuthorizedUser aktualisiert: $USER_ID"
               else
-                echo "WARNING: AuthorizedUser konnte nicht importiert werden: $USER_ID"
+                echo "WARNING: AuthorizedUser konnte nicht importiert werden: $USER_ID (HTTP $PUT_CODE)"
               fi
             fi
-          done
+          done < <(jq -c '.[]' "$IN_DIR/authorized-users.json")
 
-          echo "Importiere StringParameters..."
-          find "$IN_DIR/parameters" -name '*-string-parameters.json' -print | while read -r file; do
-            jq -c '.[]' "$file" | while read -r row; do
+          # --- StringParameters ---
+          echo "=== Importiere StringParameters ==="
+          while read -r file; do
+            while read -r row; do
               PID=$(echo "$row" | jq -r '.Pid')
               ID=$(echo "$row" | jq -r '.Id')
               VALUE=$(echo "$row" | jq -r '.Value')
@@ -564,15 +590,17 @@ jobs:
                 if [[ "$PUT_CODE" =~ ^2 ]]; then
                   echo "StringParameter aktualisiert: $PID / $ID"
                 else
-                  echo "WARNING: StringParameter konnte nicht importiert werden: $PID / $ID"
+                  echo "WARNING: StringParameter konnte nicht importiert werden: $PID / $ID (HTTP $PUT_CODE)"
                 fi
               fi
-            done
-          done
+            done < <(jq -c '.[]' "$file")
+          done < <(find "$IN_DIR/parameters" -name '*-string-parameters.json')
 
-          echo "Importiere BinaryParameters, falls exportiert..."
-          find "$IN_DIR/parameters" -name '*-binary-parameters.json' -print | while read -r file; do
-            jq -c '.[]' "$file" | while read -r row; do
+          # --- BinaryParameters ---
+          # Nur vorhanden wenn include_sensitive_partner_directory=true gesetzt war.
+          echo "=== Importiere BinaryParameters (falls exportiert) ==="
+          while read -r file; do
+            while read -r row; do
               PID=$(echo "$row" | jq -r '.Pid')
               ID=$(echo "$row" | jq -r '.Id')
               CONTENT_TYPE=$(echo "$row" | jq -r '.ContentType')
@@ -603,15 +631,19 @@ jobs:
                 if [[ "$PUT_CODE" =~ ^2 ]]; then
                   echo "BinaryParameter aktualisiert: $PID / $ID"
                 else
-                  echo "WARNING: BinaryParameter konnte nicht importiert werden: $PID / $ID"
+                  echo "WARNING: BinaryParameter konnte nicht importiert werden: $PID / $ID (HTTP $PUT_CODE)"
                 fi
               fi
-            done
-          done
+            done < <(jq -c '.[]' "$file")
+          done < <(find "$IN_DIR/parameters" -name '*-binary-parameters.json')
 
-          echo "Importiere UserCredentialParameters, falls exportiert..."
-          find "$IN_DIR/parameters" -name '*-user-credential-parameters.json' -print | while read -r file; do
-            jq -c '.[]' "$file" | while read -r row; do
+          # --- UserCredentialParameters ---
+          # Nur vorhanden wenn include_sensitive_partner_directory=true gesetzt war.
+          # Passwoerter muessen im Export enthalten sein – Eintraege ohne Password werden
+          # uebersprungen (z.B. wenn der Export ohne Passwort-Feld stattgefunden hat).
+          echo "=== Importiere UserCredentialParameters (falls exportiert) ==="
+          while read -r file; do
+            while read -r row; do
               PID=$(echo "$row" | jq -r '.Pid')
               ID=$(echo "$row" | jq -r '.Id')
               USER_VALUE=$(echo "$row" | jq -r '.User')
@@ -629,18 +661,19 @@ jobs:
                 --arg Password "$PASSWORD_VALUE" \
                 '{Pid: $Pid, Id: $Id, User: $User, Password: $Password}')
 
+              # UserCredentialParameters: POST legt an oder aktualisiert (Upsert-Semantik laut API-Doku)
               HTTP_CODE=$(api_post "UserCredentialParameters" "$BODY")
               fail_on_auth_error "$HTTP_CODE" "POST UserCredentialParameters"
 
               if [[ "$HTTP_CODE" =~ ^2 ]]; then
                 echo "UserCredentialParameter importiert: $PID / $ID"
               else
-                echo "WARNING: UserCredentialParameter konnte nicht importiert werden: $PID / $ID"
+                echo "WARNING: UserCredentialParameter konnte nicht importiert werden: $PID / $ID (HTTP $HTTP_CODE)"
               fi
-            done
-          done
+            done < <(jq -c '.[]' "$file")
+          done < <(find "$IN_DIR/parameters" -name '*-user-credential-parameters.json')
 
-          echo "Partner Directory Import in Target CPI abgeschlossen."
+          echo "=== Partner Directory Import in Target CPI abgeschlossen ==="
 
       # --- #8 MTAR ALS GITHUB ARTIFACT SICHERN ---
       - name: "#8 Upload MTAR as Artifact"
@@ -648,3 +681,5 @@ jobs:
         with:
           name: transport-package
           path: gen/*.mtar
+ENDOFFILE
+echo "Done"
