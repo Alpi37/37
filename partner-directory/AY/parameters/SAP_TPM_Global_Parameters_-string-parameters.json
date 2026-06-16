@@ -64,10 +64,10 @@
     "Pid": "SAP_TPM_Global_Parameters",
     "Id": "SAP_TPM_Pid_Resource_Last_Modified",
     "LastModifiedBy": "TPM_SYSTEM_USER",
-    "LastModifiedTime": "/Date(1781219444662)/",
+    "LastModifiedTime": "/Date(1781587241847)/",
     "CreatedBy": "TPM_SYSTEM_USER",
     "CreatedTime": "/Date(1739590759242)/",
-    "Value": "1780893109730"
+    "Value": "1781219444722"
   },
   {
     "__metadata": {
