@@ -26,13 +26,17 @@ jobs:
       contents: write
 
     steps:
-      # --- #1 REPOSITORY AUSCHECKEN ---
+      # =============================================================================
+      # #1 REPOSITORY AUSCHECKEN
+      # =============================================================================
       - name: "#1 Checkout this repo"
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # --- #2 AUTHENTIFIZIERUNG GEGEN SOURCE CPI ---
+      # =============================================================================
+      # #2 AUTHENTIFIZIERUNG GEGEN SOURCE CPI
+      # =============================================================================
       - name: "#2 Get Bearer Token for Source CPI"
         id: get-token
         env:
@@ -54,7 +58,9 @@ jobs:
 
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
-      # --- #3 IFLOWS / ARTEFAKTE AUS SOURCE CPI HERUNTERLADEN ---
+      # =============================================================================
+      # #3 IFLOWS / ARTEFAKTE AUS SOURCE CPI HERUNTERLADEN
+      # =============================================================================
       - name: "#3 Download Artifacts from Integration Suite"
         env:
           CPI_HOST: ${{ vars.CPI_HOST }}
@@ -124,12 +130,20 @@ jobs:
             exit 1
           fi
 
-      # --- #4 PARTNER DIRECTORY AUS SOURCE CPI HERUNTERLADEN ---
+      # =============================================================================
+      # #4 PARTNER DIRECTORY AUS SOURCE CPI HERUNTERLADEN
+      #
       # Partner Directory ist tenant-weit, nicht paketgebunden.
       # AlternativePartners und AuthorizedUsers werden vollstaendig (ohne Filter) exportiert.
       # BinaryParameters und UserCredentialParameters nur bei include_sensitive=true.
       # Passwoerter in UserCredentialParameters werden im Export gespeichert – nur aktivieren,
       # wenn das Repository entsprechend geschuetzt ist (private + branch protection).
+      #
+      # CHANGE: fetch_collection wurde durch fetch_collection_paged ersetzt.
+      # Grund: $top=1000 koennte auf groesseren Tenants nicht ausreichen.
+      # Die paginierte Variante folgt dem OData-Standard-Feld "__next" (d.__next),
+      # um alle Seiten abzurufen, bis keine weitere Seite mehr vorhanden ist.
+      # =============================================================================
       - name: "#4 Download Partner Directory from Source CPI"
         env:
           CPI_HOST: ${{ vars.CPI_HOST }}
@@ -142,38 +156,71 @@ jobs:
           rm -rf "$OUT_DIR"
           mkdir -p "$OUT_DIR/parameters"
 
-          # Hilfsfunktion: Ein OData-EntitySet laden und .d.results[] in Datei schreiben.
+          # ---------------------------------------------------------------------------
+          # Hilfsfunktion: Ein OData-EntitySet laden, vollstaendig paginiert.
+          # Folgt dem OData-Feld "d.__next" (skiptoken-basiertes Paging),
+          # bis keine weitere Seite vorhanden ist.
           # Zusaetzliche curl-Parameter (z.B. --data-urlencode "$filter=...") per "$@" moeglich.
-          # $top ist fest auf 1000 gesetzt – bei Tenants mit mehr Eintraegen Paging ergaenzen.
-          fetch_collection() {
+          # ---------------------------------------------------------------------------
+          fetch_collection_paged() {
             local endpoint="$1"
             local output_file="$2"
             shift 2
 
-            echo "Lade Partner Directory EntitySet [$endpoint]..."
-            HTTP_CODE=$(curl -s -G -o "$output_file.tmp" -w "%{http_code}" \
-              "${CPI_HOST}/api/v1/${endpoint}" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Accept: application/json" \
-              "$@" \
-              --data-urlencode "\$top=1000")
+            echo "Lade Partner Directory EntitySet [$endpoint] (paginiert)..."
 
-            if [ "$HTTP_CODE" -ne 200 ]; then
-              echo "WARNING: [$endpoint] konnte nicht geladen werden (HTTP $HTTP_CODE)."
-              cat "$output_file.tmp"
-              rm -f "$output_file.tmp"
-              echo "[]" > "$output_file"
-              return 0
-            fi
+            local all_results="[]"
+            local next_url="${CPI_HOST}/api/v1/${endpoint}"
+            local first_page=true
 
-            jq '.d.results // []' "$output_file.tmp" > "$output_file"
-            rm -f "$output_file.tmp"
+            while true; do
+              local tmp
+              tmp=$(mktemp)
+
+              if [ "$first_page" = true ]; then
+                HTTP_CODE=$(curl -s -G -o "$tmp" -w "%{http_code}" \
+                  "$next_url" \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Accept: application/json" \
+                  "$@" \
+                  --data-urlencode "\$top=1000")
+                first_page=false
+              else
+                # Ab Seite 2: next_url enthaelt bereits alle Query-Parameter (skiptoken)
+                HTTP_CODE=$(curl -s -o "$tmp" -w "%{http_code}" \
+                  "$next_url" \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Accept: application/json")
+              fi
+
+              if [ "$HTTP_CODE" -ne 200 ]; then
+                echo "WARNING: [$endpoint] konnte nicht geladen werden (HTTP $HTTP_CODE)."
+                cat "$tmp"
+                rm -f "$tmp"
+                echo "[]" > "$output_file"
+                return 0
+              fi
+
+              local page_results
+              page_results=$(jq '.d.results // []' "$tmp")
+              all_results=$(echo "$all_results $page_results" | jq -s 'add')
+
+              # OData-Paging: "__next" enthaelt die URL der naechsten Seite, falls vorhanden
+              next_url=$(jq -r '.d.__next // empty' "$tmp")
+              rm -f "$tmp"
+
+              [ -z "$next_url" ] && break
+              echo "  -> Naechste Seite: $next_url"
+            done
+
+            echo "$all_results" > "$output_file"
+            echo "  -> Gesamt geladen: $(jq 'length' "$output_file") Eintraege"
           }
 
           # Tenant-weite Kollektionen (kein Pid-Filter noetig)
-          fetch_collection "Partners"            "$OUT_DIR/partners.json"
-          fetch_collection "AlternativePartners" "$OUT_DIR/alternative-partners.json"
-          fetch_collection "AuthorizedUsers"     "$OUT_DIR/authorized-users.json"
+          fetch_collection_paged "Partners"            "$OUT_DIR/partners.json"
+          fetch_collection_paged "AlternativePartners" "$OUT_DIR/alternative-partners.json"
+          fetch_collection_paged "AuthorizedUsers"     "$OUT_DIR/authorized-users.json"
 
           # Pro-Partner-Kollektionen
           PARTNER_IDS=$(jq -r '.[].Pid // empty' "$OUT_DIR/partners.json")
@@ -182,16 +229,16 @@ jobs:
             [ -z "$PID" ] && continue
             SAFE_PID=$(echo "$PID" | tr -c 'A-Za-z0-9_.-' '_')
 
-            fetch_collection "StringParameters" \
+            fetch_collection_paged "StringParameters" \
               "$OUT_DIR/parameters/${SAFE_PID}-string-parameters.json" \
               --data-urlencode "\$filter=Pid eq '$PID'"
 
             if [ "$INCLUDE_SENSITIVE" = "true" ]; then
-              fetch_collection "BinaryParameters" \
+              fetch_collection_paged "BinaryParameters" \
                 "$OUT_DIR/parameters/${SAFE_PID}-binary-parameters.json" \
                 --data-urlencode "\$filter=Pid eq '$PID'"
 
-              fetch_collection "UserCredentialParameters" \
+              fetch_collection_paged "UserCredentialParameters" \
                 "$OUT_DIR/parameters/${SAFE_PID}-user-credential-parameters.json" \
                 --data-urlencode "\$filter=Pid eq '$PID'"
             fi
@@ -207,7 +254,13 @@ jobs:
               includeSensitivePartnerDirectory: ($includeSensitive == "true")
             }' > "$OUT_DIR/manifest.json"
 
-      # --- #5 IFLOWS + PARTNER DIRECTORY NACH GITHUB PUSHEN ---
+      # =============================================================================
+      # #5 IFLOWS + PARTNER DIRECTORY NACH GITHUB PUSHEN
+      #
+      # CHANGE: GHTOKEN wurde durch den eingebauten secrets.GITHUB_TOKEN ersetzt.
+      # Da der Job bereits "permissions: contents: write" hat, ist kein separates
+      # PAT-Secret noetig. Das reduziert die Anzahl zu verwaltender Secrets.
+      # =============================================================================
       - name: "#5 Commit and Push changes to GitHub"
         run: |
           git config user.email "github-actions@github.com"
@@ -216,14 +269,35 @@ jobs:
 
           if git diff --staged --quiet; then
             echo "Keine Aenderungen an iFlows oder Partner Directory festgestellt. Ueberspringe Push."
+            echo "iflows_changed=false" >> "$GITHUB_ENV"
           else
             git commit -m "Sync CPI content and partner directory from package ${{ github.event.inputs.package_id }} [skip ci]"
-            git remote set-url origin https://x-access-token:${{ secrets.GHTOKEN }}@github.com/${{ github.repository }}.git
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
             git pull origin main --rebase
             git push origin main
+            echo "iflows_changed=true" >> "$GITHUB_ENV"
           fi
 
-      # --- #6 PACKAGE VIA CAS NACH CTMS EXPORTIEREN ---
+      # =============================================================================
+      # #6 PACKAGE VIA CAS NACH CTMS EXPORTIEREN
+      #
+      # CHANGE: Delta-Erkennung vor dem CAS-Export (Punkt 7 aus den Empfehlungen).
+      # git diff vergleicht HEAD~1 (vorletzter Commit) mit HEAD (aktueller Commit).
+      # Wenn keine Datei unter iflows/<PACKAGE_ID>/ geaendert wurde, wird der
+      # gesamte CAS-Export uebersprungen – kein unnnoetiger cTMS-Transport.
+      #
+      # Wie funktioniert git diff HEAD~1 --name-only?
+      #   - HEAD~1  = der Commit unmittelbar vor dem aktuellen
+      #   - HEAD    = der aktuelle Commit (implizit)
+      #   - --name-only = gibt nur Dateinamen aus, keinen Diff-Inhalt
+      #   - grep -q "^iflows/$PACKAGE_ID/" = prueft lautlos, ob mind. eine
+      #     geaenderte Datei im iflows-Ordner des Pakets liegt
+      #
+      # Sonderfall erster Run: Wenn es noch kein HEAD~1 gibt (initialer Commit),
+      # faellt der Vergleich auf "git diff HEAD --name-only" zurueck, der alle
+      # Dateien des ersten Commits enthaelt – damit wird der Export beim ersten
+      # Run immer ausgefuehrt.
+      # =============================================================================
       - name: "#6 Export Package via CAS and push to cTMS"
         env:
           CAS_CLIENT_ID: ${{ secrets.CAS_CLIENT_ID }}
@@ -235,6 +309,25 @@ jobs:
           RUN_NUMBER="${{ github.run_number }}"
           mkdir -p gen
 
+          # --- Delta-Erkennung: CAS-Export nur wenn iFlows sich geaendert haben ---
+          if git rev-parse HEAD~1 > /dev/null 2>&1; then
+            CHANGED=$(git diff HEAD~1 HEAD --name-only | grep "^iflows/$PACKAGE_ID/" || true)
+          else
+            # Erster Commit im Repository: HEAD~1 existiert nicht -> alle Dateien als geaendert behandeln
+            echo "INFO: Kein vorangegangener Commit gefunden (erster Run). CAS-Export wird immer ausgefuehrt."
+            CHANGED="first-run"
+          fi
+
+          if [ -z "$CHANGED" ]; then
+            echo "INFO: Keine Aenderungen an iFlows in Paket [$PACKAGE_ID] erkannt."
+            echo "INFO: CAS-Export und cTMS-Transport werden uebersprungen."
+            exit 0
+          fi
+
+          echo "Aenderungen erkannt in iflows/$PACKAGE_ID – starte CAS-Export:"
+          echo "$CHANGED"
+
+          # --- CAS Authentifizierung ---
           CAS_TOKEN_RAW=$(curl -s -X POST "$CAS_TOKEN_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "grant_type=client_credentials" \
@@ -247,6 +340,7 @@ jobs:
             exit 1
           fi
 
+          # --- Resource-Metadaten aus CAS holen ---
           RESOURCES_RESPONSE=$(curl -s \
             "${CAS_API_URL}/v1/contentResources" \
             -H "Authorization: Bearer $CAS_TOKEN" \
@@ -263,6 +357,7 @@ jobs:
             exit 1
           fi
 
+          # --- Export-Request an CAS senden ---
           EXPORT_PAYLOAD=$(jq -n \
             --arg id "gh-${PACKAGE_ID}-${RUN_NUMBER}" \
             --arg pkg "$PACKAGE_ID" \
@@ -303,6 +398,7 @@ jobs:
             exit 1
           fi
 
+          # --- Polling bis Export abgeschlossen ---
           MAX_ATTEMPTS=30
           SLEEP_SECONDS=20
           STATE="UNKNOWN"
@@ -334,6 +430,7 @@ jobs:
             exit 1
           fi
 
+          # --- Transport-Request-Infos und optionaler MTAR-Download ---
           CONFIG_RESPONSE=$(curl -s \
             "${CAS_API_URL}/v1/operations/${ACTIVITY_ID}/config" \
             -H "Authorization: Bearer $CAS_TOKEN" \
@@ -363,14 +460,75 @@ jobs:
             fi
           fi
 
-      # --- #7 PARTNER DIRECTORY IN TARGET CPI IMPORTIEREN ---
+          # ===========================================================================
+          # POST-DEPLOY: IFLOW LOG-LEVEL AUF ERROR SETZEN
+          #
+          # UNDOCUMENTED SAP API: Dieser Endpunkt ist nicht offiziell dokumentiert
+          # und kann von SAP jederzeit geaendert oder entfernt werden.
+          # Quelle: SAP-eigene cicd-actions-for-sap-integration-suite Referenzimplementierung.
+          # Deaktivierung: Repository-Variable BTP_SET_LOG_LEVEL auf "false" setzen.
+          #
+          # Warum: Nach einem Deploy koennten iFlows noch mit DEBUG oder TRACE laufen,
+          # was in Produktion zu unnoetigem Log-Volumen und Datenschutzproblemen fuehrt.
+          # Der Aufruf setzt den Log-Level aller Artefakte im Paket auf ERROR.
+          #
+          # "|| true" am Ende stellt sicher, dass ein Fehler in diesem undokumentierten
+          # Aufruf den gesamten Workflow-Step nicht abbricht.
+          # ===========================================================================
+          if [ "${{ vars.BTP_SET_LOG_LEVEL }}" != "false" ]; then
+            echo "=== Setze iFlow Log-Level auf ERROR (Post-Deploy) ==="
+            SOURCE_TOKEN="${{ steps.get-token.outputs.token }}"
+
+            # Alle Artefakt-IDs aus dem Paket lesen (bereits in Step #3 geladen,
+            # hier nochmal direkt abgerufen um unabhaengig vom Workspace-Zustand zu sein)
+            ARTIFACT_LIST=$(curl -s \
+              "${{ vars.CPI_HOST }}/api/v1/IntegrationPackages('${PACKAGE_ID}')/IntegrationDesigntimeArtifacts" \
+              -H "Authorization: Bearer $SOURCE_TOKEN" \
+              -H "Accept: application/json" | jq -r '.d.results[].Id // empty')
+
+            while IFS= read -r ARTIFACT_ID; do
+              [ -z "$ARTIFACT_ID" ] && continue
+
+              # UNDOCUMENTED SAP API: /api/v1/IntegrationRuntimeArtifacts('<Id>')/logConfiguration
+              # Setzt den Log-Level eines laufenden iFlow-Artefakts zur Laufzeit.
+              HTTP_LOG=$(curl -s -o /dev/null -w "%{http_code}" \
+                -X PUT "${{ vars.CPI_HOST }}/api/v1/IntegrationRuntimeArtifacts('${ARTIFACT_ID}')/\$links/LogConfiguration" \
+                -H "Authorization: Bearer $SOURCE_TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{"logLevel": "ERROR"}' || true)
+
+              if [[ "$HTTP_LOG" =~ ^2 ]]; then
+                echo "Log-Level auf ERROR gesetzt: $ARTIFACT_ID"
+              else
+                echo "WARNING: Log-Level konnte nicht gesetzt werden fuer $ARTIFACT_ID (HTTP $HTTP_LOG) – wird uebersprungen."
+              fi
+            done <<< "$ARTIFACT_LIST"
+          else
+            echo "INFO: BTP_SET_LOG_LEVEL=false – Log-Level-Setzung uebersprungen."
+          fi
+
+      # =============================================================================
+      # #7 PARTNER DIRECTORY IN TARGET CPI IMPORTIEREN
+      #
       # Voraussetzungen (Secrets/Vars muessen konfiguriert sein):
       #   TARGET_IAS_CLIENTID, TARGET_IAS_CLIENTSECRET → secrets
       #   TARGET_BTP_TOKEN_URL, TARGET_CPI_HOST        → vars
       #
+      # CHANGE: "POST Partners"-Block wurde entfernt.
+      # Grund: CPI legt Partner-Eintraege implizit an, sobald der erste
+      # StringParameter fuer eine Pid gepostet wird. Ein expliziter POST auf
+      # "Partners" liefert zuverlaessig HTTP 500 und ist nicht notwendig.
+      #
+      # CHANGE: CSRF-Token-Erneuerung bei 403 eingebaut (CSRF Refresh Guard).
+      # Hintergrund: CSRF-Tokens von CPI koennen bei langen Importen ablaufen.
+      # Ein 403 mitten im Import koennte sonst als Berechtigungsfehler fehlinterpretiert
+      # werden. Der Guard holt einmalig einen neuen CSRF-Token und wiederholt den
+      # Aufruf. Erst danach wird fail_on_auth_error ausgeloest.
+      #
       # WICHTIG: exit 1 in Schleifen funktioniert nur korrekt mit Process Substitution
       # (done < <(jq ...)), nicht mit Pipes (jq ... | while read), da Pipes eine
       # Subshell erzeugen, in der exit 1 den uebergeordneten Step nicht beendet.
+      # =============================================================================
       - name: "#7 Import Partner Directory into Target CPI"
         if: ${{ github.event.inputs.import_partner_directory_to_target == 'true' }}
         env:
@@ -401,15 +559,22 @@ jobs:
           fi
 
           # --- CSRF Token holen ---
+          # Hilfsfunktion: CSRF-Token und Cookie-Jar neu setzen.
+          # Wird beim initialen Laden und bei CSRF-Erneuerung (Refresh Guard) aufgerufen.
           CSRF_HEADERS=$(mktemp)
           COOKIE_JAR=$(mktemp)
 
-          curl -s -o /dev/null -D "$CSRF_HEADERS" -c "$COOKIE_JAR" \
-            "${TARGET_CPI_HOST}/api/v1/" \
-            -H "Authorization: Bearer $TARGET_TOKEN" \
-            -H "X-CSRF-Token: Fetch"
+          fetch_csrf_token() {
+            > "$CSRF_HEADERS"
+            curl -s -o /dev/null -D "$CSRF_HEADERS" -c "$COOKIE_JAR" \
+              "${TARGET_CPI_HOST}/api/v1/" \
+              -H "Authorization: Bearer $TARGET_TOKEN" \
+              -H "X-CSRF-Token: Fetch"
+            CSRF_TOKEN=$(awk 'tolower($1) == "x-csrf-token:" {print $2}' "$CSRF_HEADERS" | tr -d '\r')
+          }
 
-          CSRF_TOKEN=$(awk 'tolower($1) == "x-csrf-token:" {print $2}' "$CSRF_HEADERS" | tr -d '\r')
+          fetch_csrf_token
+
           if [ -z "$CSRF_TOKEN" ]; then
             echo "CRITICAL: Kein CSRF Token von Target CPI erhalten."
             cat "$CSRF_HEADERS"
@@ -429,7 +594,7 @@ jobs:
             urlenc "$escaped"
           }
 
-          # Bricht den Step ab bei 401/403 – nur wirksam wenn NICHT in einer Pipe-Subshell
+          # Bricht den Step ab bei 401/403 – nur wirksam wenn NICHT in einer Pipe-Subshell.
           fail_on_auth_error() {
             local code="$1"
             local action="$2"
@@ -440,14 +605,22 @@ jobs:
             fi
           }
 
-          api_post() {
-            local endpoint="$1"
-            local body="$2"
+          # ---------------------------------------------------------------------------
+          # CSRF Refresh Guard:
+          # Wenn ein POST oder PUT mit HTTP 403 zurueckkommt, koennte der CSRF-Token
+          # abgelaufen sein (nicht zwingend ein echter Berechtigungsfehler).
+          # Der Guard holt einmalig einen neuen CSRF-Token und wiederholt den Aufruf.
+          # Danach wird fail_on_auth_error normal ausgewertet.
+          # ---------------------------------------------------------------------------
+          api_call_with_csrf_refresh() {
+            local method="$1"
+            local endpoint="$2"
+            local body="$3"
             local response_file
             response_file=$(mktemp)
 
             HTTP_CODE=$(curl -s -o "$response_file" -w "%{http_code}" \
-              -X POST "${TARGET_CPI_HOST}/api/v1/${endpoint}" \
+              -X "$method" "${TARGET_CPI_HOST}/api/v1/${endpoint}" \
               -b "$COOKIE_JAR" \
               -H "Authorization: Bearer $TARGET_TOKEN" \
               -H "X-CSRF-Token: $CSRF_TOKEN" \
@@ -455,48 +628,41 @@ jobs:
               -H "Accept: application/json" \
               -d "$body")
 
+            # CSRF Refresh Guard: Bei 403 einmalig Token erneuern und Aufruf wiederholen
+            if [ "$HTTP_CODE" = "403" ]; then
+              echo "INFO: HTTP 403 empfangen – versuche CSRF-Token-Erneuerung fuer [$endpoint]..."
+              fetch_csrf_token
+              if [ -n "$CSRF_TOKEN" ]; then
+                rm -f "$response_file"
+                response_file=$(mktemp)
+                HTTP_CODE=$(curl -s -o "$response_file" -w "%{http_code}" \
+                  -X "$method" "${TARGET_CPI_HOST}/api/v1/${endpoint}" \
+                  -b "$COOKIE_JAR" \
+                  -H "Authorization: Bearer $TARGET_TOKEN" \
+                  -H "X-CSRF-Token: $CSRF_TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -H "Accept: application/json" \
+                  -d "$body")
+                echo "INFO: Nach CSRF-Erneuerung: HTTP $HTTP_CODE"
+              fi
+            fi
+
             echo "$HTTP_CODE"
             cat "$response_file" >&2
             rm -f "$response_file"
+          }
+
+          api_post() {
+            api_call_with_csrf_refresh "POST" "$1" "$2"
           }
 
           api_put() {
-            local endpoint="$1"
-            local body="$2"
-            local response_file
-            response_file=$(mktemp)
-
-            HTTP_CODE=$(curl -s -o "$response_file" -w "%{http_code}" \
-              -X PUT "${TARGET_CPI_HOST}/api/v1/${endpoint}" \
-              -b "$COOKIE_JAR" \
-              -H "Authorization: Bearer $TARGET_TOKEN" \
-              -H "X-CSRF-Token: $CSRF_TOKEN" \
-              -H "Content-Type: application/json" \
-              -H "Accept: application/json" \
-              -d "$body")
-
-            echo "$HTTP_CODE"
-            cat "$response_file" >&2
-            rm -f "$response_file"
+            api_call_with_csrf_refresh "PUT" "$1" "$2"
           }
 
-          # --- Partners ---
-          echo "=== Importiere Partners ==="
-          while read -r row; do
-            PID=$(echo "$row" | jq -r '.Pid')
-            BODY=$(jq -n --arg Pid "$PID" '{Pid: $Pid}')
-
-            HTTP_CODE=$(api_post "Partners" "$BODY")
-            fail_on_auth_error "$HTTP_CODE" "POST Partners"
-
-            if [[ "$HTTP_CODE" =~ ^2 ]]; then
-              echo "Partner angelegt: $PID"
-            else
-              echo "Partner existiert bereits oder Fehler (HTTP $HTTP_CODE): $PID"
-            fi
-          done < <(jq -c '.[]' "$IN_DIR/partners.json")
-
           # --- AlternativePartners ---
+          # HINWEIS: "POST Partners" wurde entfernt – CPI legt Partner implizit an.
+          # Der erste StringParameter-POST fuer eine Pid genuegt, um den Partner zu erzeugen.
           echo "=== Importiere AlternativePartners ==="
           while read -r row; do
             AGENCY=$(echo "$row" | jq -r '.Agency')
@@ -562,6 +728,7 @@ jobs:
           done < <(jq -c '.[]' "$IN_DIR/authorized-users.json")
 
           # --- StringParameters ---
+          # StringParameter-POST erzeugt den Partner implizit, falls er noch nicht existiert.
           echo "=== Importiere StringParameters ==="
           while read -r file; do
             while read -r row; do
@@ -675,9 +842,16 @@ jobs:
 
           echo "=== Partner Directory Import in Target CPI abgeschlossen ==="
 
-      # --- #8 MTAR ALS GITHUB ARTIFACT SICHERN ---
+      # =============================================================================
+      # #8 MTAR ALS GITHUB ARTIFACT SICHERN
+      #
+      # Laeuft nur wenn gen/*.mtar existiert (d.h. CAS-Export hat stattgefunden).
+      # Bei Delta-Skip in Step #6 gibt es keine MTAR-Datei – der Upload wird
+      # stillschweigend uebersprungen (if-no-files-found: ignore).
+      # =============================================================================
       - name: "#8 Upload MTAR as Artifact"
         uses: actions/upload-artifact@v4
         with:
           name: transport-package
           path: gen/*.mtar
+          if-no-files-found: ignore
