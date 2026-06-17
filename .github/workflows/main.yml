@@ -265,6 +265,29 @@ jobs:
         run: |
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
+
+          # ---------------------------------------------------------------------------
+          # Zeitstempel-Rauschen entfernen vor dem Commit
+          #
+          # SAP CPI generiert .prop-Dateien (z.B. metainfo.prop, parameters.prop) intern
+          # ueber Java's Properties.store(), welche automatisch eine Kommentarzeile mit
+          # dem aktuellen Zeitstempel an den Dateianfang schreibt – bei JEDEM Download neu,
+          # unabhaengig davon, ob sich der eigentliche iFlow-Inhalt geaendert hat.
+          # Beispiel: "#Wed Jun 17 08:58:09 UTC 2026"
+          #
+          # Ohne diesen Schritt wuerde Step #6 faelschlich jeden Lauf als "geaendert"
+          # erkennen und einen unnoetigen CAS-Export/cTMS-Transport ausloesen.
+          #
+          # Wir entfernen daher alle Kommentarzeilen, die ausschliesslich ein Datum
+          # enthalten (Format: #<Wochentag> <Monat> <Tag> <Zeit> <Zeitzone> <Jahr>),
+          # aus allen .prop-Dateien, bevor sie zu Git hinzugefuegt werden.
+          # ---------------------------------------------------------------------------
+          echo "Entferne Zeitstempel-Kommentare aus .prop-Dateien vor dem Commit..."
+          find iflows/ -type f -name "*.prop" -print0 2>/dev/null | while IFS= read -r -d '' PROP_FILE; do
+            # Entfernt Zeilen wie "#Wed Jun 17 08:58:09 UTC 2026" (reine Zeitstempel-Kommentare)
+            sed -i -E '/^#[A-Za-z]{3} [A-Za-z]{3} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [A-Za-z]+ [0-9]{4}$/d' "$PROP_FILE"
+          done
+
           git add iflows/ partner-directory/
 
           if git diff --staged --quiet; then
@@ -309,23 +332,16 @@ jobs:
           RUN_NUMBER="${{ github.run_number }}"
           mkdir -p gen
 
-          # --- Delta-Erkennung: CAS-Export nur wenn iFlows sich geaendert haben ---
-          if git rev-parse HEAD~1 > /dev/null 2>&1; then
-            CHANGED=$(git diff HEAD~1 HEAD --name-only | grep "^iflows/$PACKAGE_ID/" || true)
-          else
-            # Erster Commit im Repository: HEAD~1 existiert nicht -> alle Dateien als geaendert behandeln
-            echo "INFO: Kein vorangegangener Commit gefunden (erster Run). CAS-Export wird immer ausgefuehrt."
-            CHANGED="first-run"
-          fi
-
-          if [ -z "$CHANGED" ]; then
-            echo "INFO: Keine Aenderungen an iFlows in Paket [$PACKAGE_ID] erkannt."
+          # --- Delta-Erkennung: vertraut der Entscheidung aus Step #5 ---
+          # iflows_changed wurde in Step #5 via $GITHUB_ENV gesetzt und steht hier
+          # als Umgebungsvariable zur Verfuegung (siehe "env:" Abschnitt unten).
+          if [ "$iflows_changed" != "true" ]; then
+            echo "INFO: Step #5 hat keinen neuen Commit erzeugt (iflows_changed=$iflows_changed)."
             echo "INFO: CAS-Export und cTMS-Transport werden uebersprungen."
             exit 0
           fi
 
-          echo "Aenderungen erkannt in iflows/$PACKAGE_ID – starte CAS-Export:"
-          echo "$CHANGED"
+          echo "Step #5 hat Aenderungen committed – starte CAS-Export fuer Paket $PACKAGE_ID."
 
           # --- CAS Authentifizierung ---
           CAS_TOKEN_RAW=$(curl -s -X POST "$CAS_TOKEN_URL" \
