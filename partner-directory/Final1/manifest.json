@@ -1,0 +1,6 @@
+{
+  "packageId": "Final1",
+  "tenantWide": true,
+  "note": "Partner Directory is tenant-wide CPI data exported through the OData API. It is committed to GitHub and imported into target CPI with a separate API step.",
+  "includeSensitivePartnerDirectory": false
+}
