@@ -654,6 +654,12 @@ jobs:
           # abgelaufen sein (nicht zwingend ein echter Berechtigungsfehler).
           # Der Guard holt einmalig einen neuen CSRF-Token und wiederholt den Aufruf.
           # Danach wird fail_on_auth_error normal ausgewertet.
+          #
+          # CHANGE: CPI-Antwort wird nur noch bei wirklich unerwarteten HTTP-Codes
+          # auf stderr ausgegeben. 400 (duplicate key) und 404 (nicht gefunden) sind
+          # im normalen POST-then-PUT Upsert-Flow erwartet und werden still behandelt,
+          # damit sie nicht als beunruhigende Fehlermeldungen am Ende des Steps
+          # gesammelt erscheinen, obwohl der Import korrekt funktioniert hat.
           # ---------------------------------------------------------------------------
           api_call_with_csrf_refresh() {
             local method="$1"
@@ -691,7 +697,14 @@ jobs:
             fi
 
             echo "$HTTP_CODE"
-            cat "$response_file" >&2
+
+            # 400 = duplicate key (Parameter existiert, wird per PUT aktualisiert) - erwartet
+            # 404 = nicht gefunden (wird per PUT neu angelegt) - erwartet
+            # Alles andere (500, 503, 401 nach Refresh etc.) ist unerwartet → anzeigen
+            if [[ ! "$HTTP_CODE" =~ ^2 ]] && [ "$HTTP_CODE" != "400" ] && [ "$HTTP_CODE" != "404" ]; then
+              cat "$response_file" >&2
+            fi
+
             rm -f "$response_file"
           }
 
