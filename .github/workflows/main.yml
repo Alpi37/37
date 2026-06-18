@@ -139,10 +139,9 @@ jobs:
       # Passwoerter in UserCredentialParameters werden im Export gespeichert – nur aktivieren,
       # wenn das Repository entsprechend geschuetzt ist (private + branch protection).
       #
-      # CHANGE: fetch_collection wurde durch fetch_collection_paged ersetzt.
-      # Grund: $top=1000 koennte auf groesseren Tenants nicht ausreichen.
-      # Die paginierte Variante folgt dem OData-Standard-Feld "__next" (d.__next),
-      # um alle Seiten abzurufen, bis keine weitere Seite mehr vorhanden ist.
+      # Paginierung: fetch_collection_paged folgt dem OData-Feld "d.__next"
+      # (skiptoken-basiertes Paging), um auch auf groesseren Tenants alle Eintraege
+      # zu laden, nicht nur die ersten 1000.
       # =============================================================================
       - name: "#4 Download Partner Directory from Source CPI"
         env:
@@ -159,7 +158,7 @@ jobs:
           # ---------------------------------------------------------------------------
           # Hilfsfunktion: Ein OData-EntitySet laden, vollstaendig paginiert.
           # Folgt dem OData-Feld "d.__next" (skiptoken-basiertes Paging),
-          # bis keine weitere Seite vorhanden ist.
+          # bis keine weitere Seite mehr vorhanden ist.
           # Zusaetzliche curl-Parameter (z.B. --data-urlencode "$filter=...") per "$@" moeglich.
           # ---------------------------------------------------------------------------
           fetch_collection_paged() {
@@ -257,32 +256,41 @@ jobs:
       # =============================================================================
       # #5 IFLOWS + PARTNER DIRECTORY NACH GITHUB PUSHEN
       #
-      # CHANGE: GHTOKEN wurde durch den eingebauten secrets.GITHUB_TOKEN ersetzt.
-      # Da der Job bereits "permissions: contents: write" hat, ist kein separates
-      # PAT-Secret noetig. Das reduziert die Anzahl zu verwaltender Secrets.
+      # FIX 1: PACKAGE_ID wird jetzt explizit gesetzt. In der Vorversion fehlte diese
+      # Zeile in Step #5 komplett - jeder Step laeuft in einer eigenen Shell-Instanz,
+      # daher war $PACKAGE_ID hier immer leer, obwohl es in #3/#4/#6 gesetzt wurde.
+      # Das hat u.a. dazu gefuehrt, dass die Zeitstempel-Bereinigung (FIX 2) nie
+      # den richtigen Pfad durchsucht hat.
+      #
+      # FIX 2: Zeitstempel-Rauschen wird vor dem Commit entfernt. SAP CPI generiert
+      # .prop-Dateien (z.B. metainfo.prop, parameters.prop) intern ueber Java's
+      # Properties.store(), welche automatisch eine Kommentarzeile mit dem aktuellen
+      # Zeitstempel an den Dateianfang schreibt - bei JEDEM Download neu, unabhaengig
+      # davon, ob sich der eigentliche iFlow-Inhalt geaendert hat.
+      # Beispiel: "#Wed Jun 17 08:58:09 UTC 2026"
+      # Der find-Befehl ist gezielt auf "iflows/$PACKAGE_ID/" eingeschraenkt, damit
+      # NICHT versehentlich andere Packages im selben Repo veraendert werden.
+      #
+      # FIX 3: iflows_changed und pd_changed werden jetzt GETRENNT berechnet, bevor
+      # gemeinsam committet wird. Vorher gab es nur ein gemeinsames Flag, das "true"
+      # wurde, sobald sich IRGENDETWAS in iflows/ ODER partner-directory/ geaendert
+      # hatte - das fuehrte dazu, dass eine reine Partner-Directory-Aenderung
+      # faelschlich einen CAS-Export/cTMS-Transport in Step #6 ausgeloest hat, obwohl
+      # sich am iFlow selbst nichts geaendert hatte. Step #6 prueft jetzt ausschliesslich
+      # iflows_changed.
       # =============================================================================
       - name: "#5 Commit and Push changes to GitHub"
         run: |
+          PACKAGE_ID="${{ github.event.inputs.package_id }}"
+
           git config user.email "github-actions@github.com"
           git config user.name "github-actions"
 
           # ---------------------------------------------------------------------------
-          # Zeitstempel-Rauschen entfernen vor dem Commit
-          #
-          # SAP CPI generiert .prop-Dateien (z.B. metainfo.prop, parameters.prop) intern
-          # ueber Java's Properties.store(), welche automatisch eine Kommentarzeile mit
-          # dem aktuellen Zeitstempel an den Dateianfang schreibt – bei JEDEM Download neu,
-          # unabhaengig davon, ob sich der eigentliche iFlow-Inhalt geaendert hat.
-          # Beispiel: "#Wed Jun 17 08:58:09 UTC 2026"
-          #
-          # Ohne diesen Schritt wuerde Step #6 faelschlich jeden Lauf als "geaendert"
-          # erkennen und einen unnoetigen CAS-Export/cTMS-Transport ausloesen.
-          #
-          # Wir entfernen daher alle Kommentarzeilen, die ausschliesslich ein Datum
-          # enthalten (Format: #<Wochentag> <Monat> <Tag> <Zeit> <Zeitzone> <Jahr>),
-          # aus allen .prop-Dateien, bevor sie zu Git hinzugefuegt werden.
+          # Zeitstempel-Rauschen entfernen vor dem Commit (nur im Ordner des aktuellen
+          # Package, damit andere Packages im Repo unberuehrt bleiben).
           # ---------------------------------------------------------------------------
-          echo "Entferne Zeitstempel-Kommentare aus .prop-Dateien vor dem Commit..."
+          echo "Entferne Zeitstempel-Kommentare aus .prop-Dateien in iflows/$PACKAGE_ID/ ..."
           find "iflows/$PACKAGE_ID/" -type f -name "*.prop" -print0 2>/dev/null | while IFS= read -r -d '' PROP_FILE; do
             # Entfernt Zeilen wie "#Wed Jun 17 08:58:09 UTC 2026" (reine Zeitstempel-Kommentare)
             sed -i -E '/^#[A-Za-z]{3} [A-Za-z]{3} [0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [A-Za-z]+ [0-9]{4}$/d' "$PROP_FILE"
@@ -290,36 +298,47 @@ jobs:
 
           git add iflows/ partner-directory/
 
+          # ---------------------------------------------------------------------------
+          # Getrennte Diff-Pruefung pro Datenquelle, BEVOR gemeinsam committet wird.
+          # Das erlaubt es Step #6, gezielt nur auf iFlow-Aenderungen zu reagieren,
+          # ohne durch Partner-Directory-Aenderungen verfaelscht zu werden.
+          # ---------------------------------------------------------------------------
+          IFLOWS_DIFF=$(git diff --staged --name-only -- "iflows/$PACKAGE_ID/" || true)
+          PD_DIFF=$(git diff --staged --name-only -- "partner-directory/$PACKAGE_ID/" || true)
+
+          if [ -n "$IFLOWS_DIFF" ]; then
+            echo "iflows_changed=true" >> "$GITHUB_ENV"
+            echo "iFlow-Aenderungen erkannt:"
+            echo "$IFLOWS_DIFF"
+          else
+            echo "iflows_changed=false" >> "$GITHUB_ENV"
+          fi
+
+          if [ -n "$PD_DIFF" ]; then
+            echo "pd_changed=true" >> "$GITHUB_ENV"
+            echo "Partner-Directory-Aenderungen erkannt:"
+            echo "$PD_DIFF"
+          else
+            echo "pd_changed=false" >> "$GITHUB_ENV"
+          fi
+
           if git diff --staged --quiet; then
             echo "Keine Aenderungen an iFlows oder Partner Directory festgestellt. Ueberspringe Push."
-            echo "iflows_changed=false" >> "$GITHUB_ENV"
           else
-            git commit -m "Sync CPI content and partner directory from package ${{ github.event.inputs.package_id }} [skip ci]"
+            git commit -m "Sync CPI content and partner directory from package ${PACKAGE_ID} [skip ci]"
             git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
             git pull origin main --rebase
             git push origin main
-            echo "iflows_changed=true" >> "$GITHUB_ENV"
           fi
 
       # =============================================================================
       # #6 PACKAGE VIA CAS NACH CTMS EXPORTIEREN
       #
-      # CHANGE: Delta-Erkennung vor dem CAS-Export (Punkt 7 aus den Empfehlungen).
-      # git diff vergleicht HEAD~1 (vorletzter Commit) mit HEAD (aktueller Commit).
-      # Wenn keine Datei unter iflows/<PACKAGE_ID>/ geaendert wurde, wird der
-      # gesamte CAS-Export uebersprungen – kein unnnoetiger cTMS-Transport.
-      #
-      # Wie funktioniert git diff HEAD~1 --name-only?
-      #   - HEAD~1  = der Commit unmittelbar vor dem aktuellen
-      #   - HEAD    = der aktuelle Commit (implizit)
-      #   - --name-only = gibt nur Dateinamen aus, keinen Diff-Inhalt
-      #   - grep -q "^iflows/$PACKAGE_ID/" = prueft lautlos, ob mind. eine
-      #     geaenderte Datei im iflows-Ordner des Pakets liegt
-      #
-      # Sonderfall erster Run: Wenn es noch kein HEAD~1 gibt (initialer Commit),
-      # faellt der Vergleich auf "git diff HEAD --name-only" zurueck, der alle
-      # Dateien des ersten Commits enthaelt – damit wird der Export beim ersten
-      # Run immer ausgefuehrt.
+      # Delta-Erkennung vertraut ausschliesslich der Entscheidung aus Step #5
+      # (iflows_changed via $GITHUB_ENV). Es wird NICHT mehr eigenstaendig per
+      # "git diff HEAD~1 HEAD" geprueft - das war die Ursache fuer wiederholte,
+      # unnoetige CAS-Exports bei No-Op-Runs, da diese Pruefung bei einem
+      # ausgelassenen Commit weiterhin denselben (alten) historischen Diff sah.
       # =============================================================================
       - name: "#6 Export Package via CAS and push to cTMS"
         env:
@@ -333,15 +352,13 @@ jobs:
           mkdir -p gen
 
           # --- Delta-Erkennung: vertraut der Entscheidung aus Step #5 ---
-          # iflows_changed wurde in Step #5 via $GITHUB_ENV gesetzt und steht hier
-          # als Umgebungsvariable zur Verfuegung (siehe "env:" Abschnitt unten).
           if [ "$iflows_changed" != "true" ]; then
-            echo "INFO: Step #5 hat keinen neuen Commit erzeugt (iflows_changed=$iflows_changed)."
+            echo "INFO: Step #5 hat keine iFlow-Aenderungen committed (iflows_changed=$iflows_changed)."
             echo "INFO: CAS-Export und cTMS-Transport werden uebersprungen."
             exit 0
           fi
 
-          echo "Step #5 hat Aenderungen committed – starte CAS-Export fuer Paket $PACKAGE_ID."
+          echo "iFlow-Aenderungen wurden committed - starte CAS-Export fuer Paket $PACKAGE_ID."
 
           # --- CAS Authentifizierung ---
           CAS_TOKEN_RAW=$(curl -s -X POST "$CAS_TOKEN_URL" \
@@ -530,20 +547,25 @@ jobs:
       #   TARGET_IAS_CLIENTID, TARGET_IAS_CLIENTSECRET → secrets
       #   TARGET_BTP_TOKEN_URL, TARGET_CPI_HOST        → vars
       #
-      # CHANGE: "POST Partners"-Block wurde entfernt.
-      # Grund: CPI legt Partner-Eintraege implizit an, sobald der erste
-      # StringParameter fuer eine Pid gepostet wird. Ein expliziter POST auf
+      # "POST Partners" wurde entfernt - CPI legt Partner implizit an, sobald der
+      # erste StringParameter fuer eine Pid gepostet wird. Ein expliziter POST auf
       # "Partners" liefert zuverlaessig HTTP 500 und ist nicht notwendig.
       #
-      # CHANGE: CSRF-Token-Erneuerung bei 403 eingebaut (CSRF Refresh Guard).
-      # Hintergrund: CSRF-Tokens von CPI koennen bei langen Importen ablaufen.
-      # Ein 403 mitten im Import koennte sonst als Berechtigungsfehler fehlinterpretiert
-      # werden. Der Guard holt einmalig einen neuen CSRF-Token und wiederholt den
-      # Aufruf. Erst danach wird fail_on_auth_error ausgeloest.
+      # CSRF-Token-Erneuerung bei 403 (CSRF Refresh Guard): CSRF-Tokens von CPI
+      # koennen bei langen Importen ablaufen. Ein 403 mitten im Import koennte sonst
+      # als Berechtigungsfehler fehlinterpretiert werden. Der Guard holt einmalig
+      # einen neuen CSRF-Token und wiederholt den Aufruf. Erst danach wird
+      # fail_on_auth_error ausgeloest.
       #
       # WICHTIG: exit 1 in Schleifen funktioniert nur korrekt mit Process Substitution
       # (done < <(jq ...)), nicht mit Pipes (jq ... | while read), da Pipes eine
       # Subshell erzeugen, in der exit 1 den uebergeordneten Step nicht beendet.
+      #
+      # HINWEIS: Dieser Step laeuft unabhaengig davon, ob sich die Partner Directory
+      # tatsaechlich geaendert hat (pd_changed) - er wird ausschliesslich durch den
+      # Input "import_partner_directory_to_target" gesteuert. pd_changed steht als
+      # Information zur Verfuegung, falls eine zukuenftige Optimierung den Import
+      # nur bei echten Aenderungen auslosen soll.
       # =============================================================================
       - name: "#7 Import Partner Directory into Target CPI"
         if: ${{ github.event.inputs.import_partner_directory_to_target == 'true' }}
@@ -555,6 +577,11 @@ jobs:
         run: |
           PACKAGE_ID="${{ github.event.inputs.package_id }}"
           IN_DIR="partner-directory/$PACKAGE_ID"
+
+          if [ "$pd_changed" != "true" ]; then
+            echo "INFO: Keine neuen Partner-Directory-Aenderungen erkannt (pd_changed=$pd_changed)."
+            echo "INFO: Import laeuft trotzdem, da import_partner_directory_to_target=true explizit gesetzt wurde."
+          fi
 
           if [ ! -d "$IN_DIR" ]; then
             echo "CRITICAL: Partner Directory Export nicht gefunden: $IN_DIR"
